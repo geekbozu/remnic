@@ -249,6 +249,96 @@ test("last recall serialization resolves namespace collection-prefixed result pa
   );
 });
 
+test("last recall serialization does not fall back after namespace collection misses", async () => {
+  const service = Object.create(EngramAccessService.prototype) as EngramAccessService;
+  const memoryRoot = await mkdtemp(path.join(os.tmpdir(), "remnic-access-qmd-ns-miss-"));
+  const defaultMemoryPath = path.join(
+    memoryRoot,
+    "facts",
+    "2026-06-16",
+    "fact-001.md",
+  );
+  const defaultMemory = {
+    path: defaultMemoryPath,
+    frontmatter: {
+      id: "fact-001",
+      created: "2026-06-16T12:00:00.000Z",
+      updated: "2026-06-16T12:00:00.000Z",
+      category: "fact",
+      status: "active",
+    },
+    content: "Default namespace content should not be reused.",
+  };
+  const teamDir = path.join(
+    memoryRoot,
+    "namespaces",
+    namespaceIdentityToken("team"),
+  );
+  const readCalls: Array<{ namespace: string; path: string }> = [];
+  const storages: Record<string, StorageManager> = {
+    default: {
+      dir: memoryRoot,
+      async readMemoryByPath(filePath: string) {
+        readCalls.push({ namespace: "default", path: filePath });
+        return filePath === defaultMemoryPath ? defaultMemory : null;
+      },
+      async getMemoryById() {
+        return null;
+      },
+    } as unknown as StorageManager,
+    team: {
+      dir: teamDir,
+      async readMemoryByPath(filePath: string) {
+        readCalls.push({ namespace: "team", path: filePath });
+        return null;
+      },
+      async getMemoryById() {
+        return null;
+      },
+    } as unknown as StorageManager,
+  };
+
+  (service as unknown as {
+    orchestrator: {
+      config: PluginConfig;
+      getStorage(namespace: string): Promise<StorageManager>;
+    };
+  }).orchestrator = {
+    config: makeConfig(),
+    async getStorage(namespace: string) {
+      return storages[namespace] ?? storages.default;
+    },
+  };
+
+  const collection = namespaceCollectionName("test-memory", "team", {
+    defaultNamespace: "default",
+    useLegacyDefaultCollection: false,
+  });
+  const result = await (service as unknown as {
+    serializeRecallResults(
+      snapshot: unknown,
+      disclosure: "summary",
+    ): Promise<Array<{ id: string; path: string; preview: string; status: string }>>;
+  }).serializeRecallResults(
+    {
+      sessionKey: "session-1",
+      recordedAt: "2026-06-16T12:00:00.000Z",
+      queryHash: "hash",
+      queryLen: 4,
+      memoryIds: [],
+      namespace: "default",
+      resultPaths: [`${collection}/2026-06-16/fact-001.md`],
+    },
+    "summary",
+  );
+
+  assert.deepEqual(result, []);
+  assert.ok(
+    readCalls.every((call) => call.namespace === "team"),
+    "expected recognized collection-prefixed miss not to probe default storage",
+  );
+});
+
 test("memorySearch without an explicit namespace uses readable recall namespaces", async () => {
   const { service } = makeService();
   let searchParams: unknown;

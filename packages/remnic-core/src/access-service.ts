@@ -1578,8 +1578,9 @@ export class EngramAccessService {
             const memory = await collectionStorage.readMemoryByPath(candidate);
             if (memory) return { memory, baseDir: collectionStorage.dir };
           }
+          return null;
         } catch {
-          // Fall through to the snapshot namespace candidates.
+          return null;
         }
       }
 
