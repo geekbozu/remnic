@@ -9611,8 +9611,9 @@ export class Orchestrator {
             if (!graphExpansion) {
               graphSnapshotStatus = "aborted";
               graphDecisionStatus = "aborted";
-              graphDecisionReason =
-                "graph expansion skipped because shared post-retrieval assembly budget expired";
+              graphDecisionReason = options.abortSignal?.aborted
+                ? "graph expansion skipped because recall assembly was aborted"
+                : "graph expansion skipped because shared post-retrieval assembly budget expired";
               graphSnapshotReason = graphDecisionReason;
               graphSnapshotSeedPaths = baselineMemoryResults
                 .slice(0, Math.max(1, recallResultLimit))
@@ -9700,7 +9701,11 @@ export class Orchestrator {
       const qmdBoostInput = await this.filterSearchResultsForRecall(
         memoryResults,
         undefined,
-        { asOfMs },
+        {
+          asOfMs,
+          deadlineAtMs: enrichmentAssemblyDeadlineAtMs,
+          abortSignal: options.abortSignal,
+        },
       );
 
       // Apply recency and access count boosting
@@ -16286,7 +16291,12 @@ export class Orchestrator {
     const boostInput = await this.filterSearchResultsForRecall(
       results,
       undefined,
-      { allowLifecycleFiltered: true, asOfMs: options.asOfMs },
+      {
+        allowLifecycleFiltered: true,
+        asOfMs: options.asOfMs,
+        deadlineAtMs: options.deadlineAtMs,
+        abortSignal: options.abortSignal,
+      },
     );
     results = boostInput.results;
     const boostTimeoutMs =
@@ -16489,20 +16499,59 @@ export class Orchestrator {
   private async loadSearchResultMemoryMap(
     results: QmdSearchResult[],
     preloadedMemoryMap?: Map<string, MemoryFile>,
-  ): Promise<Map<string, MemoryFile>> {
+    options?: {
+      deadlineAtMs?: number | null;
+      abortSignal?: AbortSignal;
+    },
+  ): Promise<{
+    memoryByPath: Map<string, MemoryFile>;
+    checkedPaths: Set<string>;
+    completed: boolean;
+  }> {
     const memoryByPath: Map<string, MemoryFile> = preloadedMemoryMap
       ? new Map(preloadedMemoryMap)
       : new Map();
+    const checkedPaths = new Set<string>();
 
-    await Promise.all(
-      results.map(async (r) => {
-        if (!r.path || memoryByPath.has(r.path)) return;
-        const mem = await this.readQmdResultMemory(r.path, this.storage);
-        if (mem) memoryByPath.set(r.path, mem);
-      }),
-    );
+    const markChecked = (result: QmdSearchResult): void => {
+      if (result.path) checkedPaths.add(result.path);
+    };
+    const deadlineExpired = (): boolean =>
+      typeof options?.deadlineAtMs === "number" &&
+      Date.now() >= options.deadlineAtMs;
 
-    return memoryByPath;
+    if (!options?.abortSignal && options?.deadlineAtMs == null) {
+      await Promise.all(
+        results.map(async (r) => {
+          if (!r.path) return;
+          if (memoryByPath.has(r.path)) {
+            markChecked(r);
+            return;
+          }
+          const mem = await this.readQmdResultMemory(r.path, this.storage);
+          markChecked(r);
+          if (mem) memoryByPath.set(r.path, mem);
+        }),
+      );
+
+      return { memoryByPath, checkedPaths, completed: true };
+    }
+
+    for (const result of results) {
+      if (!result.path) continue;
+      if (memoryByPath.has(result.path)) {
+        markChecked(result);
+        continue;
+      }
+      if (options?.abortSignal?.aborted || deadlineExpired()) {
+        return { memoryByPath, checkedPaths, completed: false };
+      }
+      const mem = await this.readQmdResultMemory(result.path, this.storage);
+      markChecked(result);
+      if (mem) memoryByPath.set(result.path, mem);
+    }
+
+    return { memoryByPath, checkedPaths, completed: true };
   }
 
   private filterSearchResultsByRecallSafety(
@@ -16615,6 +16664,8 @@ export class Orchestrator {
       allowLifecycleFiltered?: boolean;
       allowDedicatedSurface?: boolean;
       asOfMs?: number;
+      deadlineAtMs?: number | null;
+      abortSignal?: AbortSignal;
     },
   ): Promise<{ results: QmdSearchResult[]; memoryByPath: Map<string, MemoryFile> }> {
     if (results.length === 0) {
@@ -16623,17 +16674,26 @@ export class Orchestrator {
         memoryByPath: preloadedMemoryMap ? new Map(preloadedMemoryMap) : new Map(),
       };
     }
-    const memoryByPath = await this.loadSearchResultMemoryMap(
+    const loaded = await this.loadSearchResultMemoryMap(
       results,
       preloadedMemoryMap,
+      options,
     );
+    const candidateResults = loaded.completed
+      ? results
+      : results.filter((result) => !result.path || loaded.checkedPaths.has(result.path));
+    if (!loaded.completed) {
+      log.debug(
+        `recall safety filter stopped before validating all candidates (${candidateResults.length}/${results.length} eligible)`,
+      );
+    }
     return {
       results: this.filterSearchResultsByRecallSafety(
-        results,
-        memoryByPath,
+        candidateResults,
+        loaded.memoryByPath,
         options,
       ),
-      memoryByPath,
+      memoryByPath: loaded.memoryByPath,
     };
   }
 

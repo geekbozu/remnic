@@ -326,6 +326,66 @@ test("recall safety filtering is available without running score boosts", async 
   );
 });
 
+test("recall safety filtering does not return unchecked results after deadline", async () => {
+  const memoryDir = await makeTmpDir("engram-recall-safety-deadline-");
+  const factsDir = path.join(memoryDir, "facts");
+  await mkdir(factsDir, { recursive: true });
+  const active = await writeMemory(factsDir, "fact-active");
+
+  const orchestrator = await makeOrchestrator(memoryDir);
+  (orchestrator as any).initPromise = null;
+  let readAttempts = 0;
+  (orchestrator as any).readQmdResultMemory = async () => {
+    readAttempts += 1;
+    return null;
+  };
+
+  const filtered = await (orchestrator as any).filterSearchResultsForRecall(
+    [{ docid: "active", path: active, snippet: "active", score: 0.4 }],
+    undefined,
+    { deadlineAtMs: Date.now() - 1 },
+  );
+
+  assert.equal(readAttempts, 0);
+  assert.deepEqual(filtered.results, []);
+});
+
+test("recall safety filtering keeps checked candidates when deadline expires mid-scan", async () => {
+  const memoryDir = await makeTmpDir("engram-recall-safety-partial-deadline-");
+  const factsDir = path.join(memoryDir, "facts");
+  await mkdir(factsDir, { recursive: true });
+  const active = await writeMemory(factsDir, "fact-active");
+  const unchecked = await writeMemory(factsDir, "fact-unchecked");
+
+  const orchestrator = await makeOrchestrator(memoryDir);
+  (orchestrator as any).initPromise = null;
+
+  const realDateNow = Date.now;
+  let nowCalls = 0;
+  Date.now = () => {
+    nowCalls += 1;
+    return nowCalls === 1 ? 1_000 : 2_000;
+  };
+
+  try {
+    const filtered = await (orchestrator as any).filterSearchResultsForRecall(
+      [
+        { docid: "active", path: active, snippet: "active", score: 0.4 },
+        { docid: "unchecked", path: unchecked, snippet: "unchecked", score: 0.9 },
+      ],
+      undefined,
+      { deadlineAtMs: 1_500 },
+    );
+
+    assert.deepEqual(
+      filtered.results.map((result: { path: string }) => path.basename(result.path)),
+      ["fact-active.md"],
+    );
+  } finally {
+    Date.now = realDateNow;
+  }
+});
+
 test("boost capped at reinforcementRecallBoostMax", async () => {
   const memoryDir = await makeTmpDir("engram-reinforce-cap-");
   await mkdir(path.join(memoryDir, "facts"), { recursive: true });

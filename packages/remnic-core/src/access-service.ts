@@ -1559,7 +1559,9 @@ export class EngramAccessService {
       }
       return null;
     };
-    const readResultPath = async (memoryPath: string): Promise<MemoryFile | null> => {
+    const readResultPath = async (
+      memoryPath: string,
+    ): Promise<{ memory: MemoryFile; baseDir: string } | null> => {
       const parts = qmdCollectionPathParts(memoryPath);
       const collectionNamespace = parts
         ? collectionNamespaceFromPrefix(parts.collection)
@@ -1574,7 +1576,7 @@ export class EngramAccessService {
             parts.relativePath,
           )) {
             const memory = await collectionStorage.readMemoryByPath(candidate);
-            if (memory) return memory;
+            if (memory) return { memory, baseDir: collectionStorage.dir };
           }
         } catch {
           // Fall through to the snapshot namespace candidates.
@@ -1583,7 +1585,7 @@ export class EngramAccessService {
 
       for (const candidate of qmdResultPathCandidates(storageDir, memoryPath)) {
         const memory = await storage.readMemoryByPath(candidate);
-        if (memory) return memory;
+        if (memory) return { memory, baseDir: storageDir };
       }
       return null;
     };
@@ -1604,13 +1606,14 @@ export class EngramAccessService {
 
     for (const memoryPath of snapshot.resultPaths ?? []) {
       if (!memoryPath || seen.has(memoryPath)) continue;
-      const memory = await readResultPath(memoryPath);
-      if (!memory) continue;
+      const resolved = await readResultPath(memoryPath);
+      if (!resolved) continue;
+      const { memory, baseDir } = resolved;
       seen.add(memoryPath);
       results.push(
         this.serializeMemorySummary(
           memory,
-          storageDir,
+          baseDir,
           disclosure,
           // Attach the (possibly empty) raw excerpts to the first raw
           // result; subsequent results do not duplicate the array.

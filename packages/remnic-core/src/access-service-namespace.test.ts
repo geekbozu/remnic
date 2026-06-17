@@ -159,7 +159,13 @@ test("last recall serialization resolves namespace collection-prefixed result pa
     "namespaces",
     namespaceIdentityToken("team"),
   );
-  const memoryPath = path.join(teamDir, "facts", "2026-06-16", "fact-001.md");
+  const memoryPath = path.join(
+    teamDir,
+    "archive",
+    "facts",
+    "2026-06-16",
+    "fact-001.md",
+  );
   const teamMemory = {
     path: memoryPath,
     frontmatter: {
@@ -216,7 +222,7 @@ test("last recall serialization resolves namespace collection-prefixed result pa
     serializeRecallResults(
       snapshot: unknown,
       disclosure: "summary",
-    ): Promise<Array<{ id: string; path: string; preview: string }>>;
+    ): Promise<Array<{ id: string; path: string; preview: string; status: string }>>;
   }).serializeRecallResults(
     {
       sessionKey: "session-1",
@@ -225,7 +231,7 @@ test("last recall serialization resolves namespace collection-prefixed result pa
       queryLen: 4,
       memoryIds: [],
       namespace: "default",
-      resultPaths: [`${collection}/2026-06-16/fact-001.md`],
+      resultPaths: [`${collection}/archive/facts/2026-06-16/fact-001.md`],
     },
     "summary",
   );
@@ -233,6 +239,7 @@ test("last recall serialization resolves namespace collection-prefixed result pa
   assert.equal(result.length, 1);
   assert.equal(result[0].id, "fact-001");
   assert.equal(result[0].path, memoryPath);
+  assert.equal(result[0].status, "archived");
   assert.ok(result[0].preview.includes("Agent-authored status update"));
   assert.ok(
     readCalls.some(
