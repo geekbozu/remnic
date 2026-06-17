@@ -360,6 +360,36 @@ test("namespace collection misses do not fall back to default storage", async ()
   assert.strictEqual(result[0].explain?.reinforcementBoost, undefined);
 });
 
+test("date-relative QMD misses do not fall back to storage root basename", async () => {
+  const memoryDir = await makeTmpDir("engram-reinforce-qmd-date-miss-");
+  await writeMemory(memoryDir, "fact-001", {
+    reinforcement_count: 9,
+  });
+
+  const orchestrator = await makeOrchestrator(memoryDir, {
+    reinforcementRecallBoostEnabled: true,
+    reinforcementRecallBoostWeight: 0.1,
+    reinforcementRecallBoostMax: 1.0,
+  });
+  (orchestrator as any).initPromise = null;
+
+  const result = await (orchestrator as any).boostSearchResults(
+    [
+      {
+        docid: "fact-001",
+        path: "2026-06-16/fact-001.md",
+        snippet: "missing dated hit",
+        score: 0.5,
+      },
+    ],
+    ["default"],
+  );
+
+  assert.equal(result.length, 1);
+  assert.strictEqual(result[0].score, 0.5);
+  assert.strictEqual(result[0].explain?.reinforcementBoost, undefined);
+});
+
 test("recall safety filtering is available without running score boosts", async () => {
   const memoryDir = await makeTmpDir("engram-recall-safety-filter-");
   const factsDir = path.join(memoryDir, "facts");

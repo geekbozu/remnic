@@ -339,6 +339,70 @@ test("last recall serialization does not fall back after namespace collection mi
   );
 });
 
+test("last recall serialization does not treat date paths as collection prefixes", async () => {
+  const service = Object.create(EngramAccessService.prototype) as EngramAccessService;
+  const memoryRoot = await mkdtemp(path.join(os.tmpdir(), "remnic-access-qmd-date-miss-"));
+  const rootMemoryPath = path.join(memoryRoot, "fact-001.md");
+  const rootMemory = {
+    path: rootMemoryPath,
+    frontmatter: {
+      id: "fact-001",
+      created: "2026-06-16T12:00:00.000Z",
+      updated: "2026-06-16T12:00:00.000Z",
+      category: "fact",
+      status: "active",
+    },
+    content: "Root basename content should not be reused.",
+  };
+  const readCalls: string[] = [];
+  const storage = {
+    dir: memoryRoot,
+    async readMemoryByPath(filePath: string) {
+      readCalls.push(filePath);
+      return filePath === rootMemoryPath ? rootMemory : null;
+    },
+    async getMemoryById() {
+      return null;
+    },
+  } as unknown as StorageManager;
+
+  (service as unknown as {
+    orchestrator: {
+      config: PluginConfig;
+      getStorage(namespace: string): Promise<StorageManager>;
+    };
+  }).orchestrator = {
+    config: makeConfig(),
+    async getStorage() {
+      return storage;
+    },
+  };
+
+  const result = await (service as unknown as {
+    serializeRecallResults(
+      snapshot: unknown,
+      disclosure: "summary",
+    ): Promise<Array<{ id: string; path: string; preview: string; status: string }>>;
+  }).serializeRecallResults(
+    {
+      sessionKey: "session-1",
+      recordedAt: "2026-06-16T12:00:00.000Z",
+      queryHash: "hash",
+      queryLen: 4,
+      memoryIds: [],
+      namespace: "default",
+      resultPaths: ["2026-06-16/fact-001.md"],
+    },
+    "summary",
+  );
+
+  assert.deepEqual(result, []);
+  assert.ok(
+    !readCalls.includes(rootMemoryPath),
+    "expected date-relative miss not to probe storage root basename",
+  );
+});
+
 test("memorySearch without an explicit namespace uses readable recall namespaces", async () => {
   const { service } = makeService();
   let searchParams: unknown;
