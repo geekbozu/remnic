@@ -696,4 +696,43 @@ describe("GraphIndex.spreadingActivation — assembly deadlines", () => {
       await rm(dir, { recursive: true, force: true });
     }
   });
+
+  it("keeps completed BFS results when the deadline expires before inhibition", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "engram-sa-deadline-partial-"));
+    const originalNow = Date.now;
+    try {
+      const gi = new GraphIndex(dir, {
+        ...cfg,
+        graphTraversalPageRankIterations: 0,
+        graphLateralInhibitionEnabled: true,
+      } as unknown as GraphConfig);
+      await appendEdge(dir, {
+        from: "A.md",
+        to: "B.md",
+        type: "entity",
+        weight: 1.0,
+        label: "deadline",
+        ts: new Date().toISOString(),
+      });
+
+      let calls = 0;
+      Date.now = () => {
+        calls += 1;
+        return calls < 6 ? 1_000 : 2_000;
+      };
+
+      const results = await gi.spreadingActivation(["A.md"], 1, {
+        deadlineAtMs: 1_500,
+      });
+      assert.equal(results.length, 1);
+      assert.equal(results[0].path, "B.md");
+      assert.ok(
+        Math.abs(results[0].score - 0.7) < 0.001,
+        `expected BFS score 0.7 got ${results[0].score}`,
+      );
+    } finally {
+      Date.now = originalNow;
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
 });

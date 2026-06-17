@@ -591,15 +591,27 @@ export class GraphIndex {
         frontier.set(`${seed}\0${seed}`, { node: seed, seed, activation: 1 });
         reachedBySeed.set(seed, new Set([seed]));
       }
+      const finalizeScores = () =>
+        Array.from(scores.entries())
+          .map(([p, score]) => ({
+            path: p,
+            score,
+            seed: provenance.get(p)?.seed ?? "",
+            hopDepth: provenance.get(p)?.hopDepth ?? 0,
+            decayedWeight: provenance.get(p)?.decayedWeight ?? 0,
+            graphType: provenance.get(p)?.graphType ?? "entity",
+            edgeConfidence: provenance.get(p)?.edgeConfidence ?? 1,
+          }))
+          .sort((a, b) => b.score - a.score);
 
       for (let hop = 0; hop < steps && frontier.size > 0; hop++) {
-        if (deadlineExpired()) return [];
+        if (deadlineExpired()) return finalizeScores();
         const nextFrontier = new Map<string, { node: string; seed: string; activation: number }>();
 
         for (const { node, seed: sourceSeed, activation } of frontier.values()) {
           const edges = adj.get(node) ?? [];
           for (let i = 0; i < edges.length; i += 1) {
-            if ((i & 1023) === 0 && deadlineExpired()) return [];
+            if ((i & 1023) === 0 && deadlineExpired()) return finalizeScores();
             const edge = edges[i];
             const neighbor = edge.to === node ? edge.from : edge.to;
             const conf = readEdgeConfidence(edge);
@@ -666,7 +678,7 @@ export class GraphIndex {
       }
 
       // Apply lateral inhibition if enabled (Synapse-inspired competitive suppression)
-      if (deadlineExpired()) return [];
+      if (deadlineExpired()) return finalizeScores();
       if (this.cfg.graphLateralInhibitionEnabled && scores.size > 1) {
         const inhibited = applyLateralInhibition(scores, {
           beta: this.cfg.graphLateralInhibitionBeta,
@@ -677,17 +689,7 @@ export class GraphIndex {
         }
       }
 
-      return Array.from(scores.entries())
-        .map(([p, score]) => ({
-          path: p,
-          score,
-          seed: provenance.get(p)?.seed ?? "",
-          hopDepth: provenance.get(p)?.hopDepth ?? 0,
-          decayedWeight: provenance.get(p)?.decayedWeight ?? 0,
-          graphType: provenance.get(p)?.graphType ?? "entity",
-          edgeConfidence: provenance.get(p)?.edgeConfidence ?? 1,
-        }))
-        .sort((a, b) => b.score - a.score);
+      return finalizeScores();
     } catch (err) {
       const { log } = await import("./logger.js");
       log.warn(`[graph] spreadingActivation error: ${err}`);

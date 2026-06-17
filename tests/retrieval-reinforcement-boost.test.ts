@@ -288,6 +288,44 @@ test("boost resolves QMD collection-prefixed namespace result paths", async () =
   );
 });
 
+test("recall safety filtering is available without running score boosts", async () => {
+  const memoryDir = await makeTmpDir("engram-recall-safety-filter-");
+  const factsDir = path.join(memoryDir, "facts");
+  await mkdir(factsDir, { recursive: true });
+  const active = await writeMemory(factsDir, "fact-active");
+  const forgotten = await writeMemory(factsDir, "fact-forgotten", {
+    status: "forgotten",
+  });
+  const superseded = await writeMemory(factsDir, "fact-superseded", {
+    status: "superseded",
+  });
+  const dream = await writeMemory(factsDir, "fact-dream", {
+    memoryKind: "dream",
+  });
+
+  const orchestrator = await makeOrchestrator(memoryDir, {
+    temporalSupersessionEnabled: true,
+    temporalSupersessionIncludeInRecall: false,
+  });
+  (orchestrator as any).initPromise = null;
+
+  const filtered = await (orchestrator as any).filterSearchResultsForRecall(
+    [
+      { docid: "active", path: active, snippet: "active", score: 0.4 },
+      { docid: "forgotten", path: forgotten, snippet: "forgotten", score: 0.9 },
+      { docid: "superseded", path: superseded, snippet: "superseded", score: 0.8 },
+      { docid: "dream", path: dream, snippet: "dream", score: 0.7 },
+    ],
+    undefined,
+    {},
+  );
+
+  assert.deepEqual(
+    filtered.results.map((result: { path: string }) => path.basename(result.path)),
+    ["fact-active.md"],
+  );
+});
+
 test("boost capped at reinforcementRecallBoostMax", async () => {
   const memoryDir = await makeTmpDir("engram-reinforce-cap-");
   await mkdir(path.join(memoryDir, "facts"), { recursive: true });

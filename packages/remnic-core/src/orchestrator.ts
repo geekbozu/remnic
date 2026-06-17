@@ -9692,18 +9692,29 @@ export class Orchestrator {
         }
       }
 
+      // Apply mandatory recall safety filters before deadline-bound scoring
+      // enrichment. If scoring times out, we must fall back to this filtered
+      // list rather than raw QMD hits; boostSearchResults also removes
+      // forgotten, lifecycle-filtered, superseded/as_of-invalid, and
+      // dream/procedural memories.
+      const qmdBoostInput = await this.filterSearchResultsForRecall(
+        memoryResults,
+        undefined,
+        { asOfMs },
+      );
+
       // Apply recency and access count boosting
       memoryResults = await awaitAssemblyStep(
         "qmd-boost",
         () =>
           this.boostSearchResults(
-            memoryResults,
+            qmdBoostInput.results,
             recallNamespaces,
             retrievalQuery,
-            undefined,
+            qmdBoostInput.memoryByPath,
             { asOfMs },
           ),
-        memoryResults,
+        qmdBoostInput.results,
       );
 
       // Optional LLM reranking (default off). Fail-open if rerank fails/slow.
@@ -16272,13 +16283,62 @@ export class Orchestrator {
       results = merged;
     }
 
-    results = await this.boostSearchResults(
+    const boostInput = await this.filterSearchResultsForRecall(
       results,
-      options.recallNamespaces,
-      options.prompt,
       undefined,
       { allowLifecycleFiltered: true, asOfMs: options.asOfMs },
     );
+    results = boostInput.results;
+    const boostTimeoutMs =
+      typeof options.deadlineAtMs === "number"
+        ? Math.max(0, options.deadlineAtMs - Date.now())
+        : null;
+    if (boostTimeoutMs !== 0) {
+      let timeoutHandle: NodeJS.Timeout | undefined;
+      try {
+        const boosted = await (boostTimeoutMs !== null
+          ? Promise.race<QmdSearchResult[] | { status: "timed_out" }>([
+              this.boostSearchResults(
+                boostInput.results,
+                options.recallNamespaces,
+                options.prompt,
+                boostInput.memoryByPath,
+                { allowLifecycleFiltered: true, asOfMs: options.asOfMs },
+              ),
+              new Promise<{ status: "timed_out" }>((resolve) => {
+                timeoutHandle = setTimeout(
+                  () => resolve({ status: "timed_out" }),
+                  boostTimeoutMs,
+                );
+              }),
+            ])
+          : this.boostSearchResults(
+              boostInput.results,
+              options.recallNamespaces,
+              options.prompt,
+              boostInput.memoryByPath,
+              { allowLifecycleFiltered: true, asOfMs: options.asOfMs },
+            ));
+        if (
+          typeof boosted === "object" &&
+          boosted !== null &&
+          "status" in boosted &&
+          boosted.status === "timed_out"
+        ) {
+          log.debug("cold-tier recall boost skipped: shared assembly deadline expired");
+        } else if (Array.isArray(boosted)) {
+          results = boosted;
+        } else {
+          results = boostInput.results;
+        }
+      } catch (err) {
+        log.debug(`cold-tier recall boost failed open: ${err}`);
+      } finally {
+        if (timeoutHandle) clearTimeout(timeoutHandle);
+      }
+    } else {
+      log.debug("cold-tier recall boost skipped: shared assembly deadline already expired");
+    }
 
     if (this.config.rerankEnabled && this.config.rerankProvider === "local") {
       const ranked = await rerankLocalOrNoop({
@@ -16426,104 +16486,41 @@ export class Orchestrator {
     log.debug(`flushed ${entries.length} access tracking entries`);
   }
 
-  /**
-   * Apply recency, access count, and importance boosting to QMD search results.
-   * Returns re-ranked results.
-   */
-  private async boostSearchResults(
+  private async loadSearchResultMemoryMap(
     results: QmdSearchResult[],
-    _recallNamespaces: string[],
-    prompt?: string,
     preloadedMemoryMap?: Map<string, MemoryFile>,
-    options?: {
-      allowLifecycleFiltered?: boolean;
-      allowDedicatedSurface?: boolean;
-      /**
-       * Historical recall point in ms-since-epoch (issue #680).  When
-       * set, drops candidates that were not authoritative at this
-       * instant per `temporal-validity.isValidAsOf`.  Caller is
-       * responsible for parsing/validating the user-supplied ISO
-       * string at the input boundary (CLI / HTTP / MCP).
-       */
-      asOfMs?: number;
-    },
-  ): Promise<QmdSearchResult[]> {
-    if (results.length === 0) return results;
-
-    const now = Date.now();
-    // Seed with any pre-loaded memories (e.g. from the recency fallback path)
-    // to avoid redundant disk reads for files already in memory.
+  ): Promise<Map<string, MemoryFile>> {
     const memoryByPath: Map<string, MemoryFile> = preloadedMemoryMap
       ? new Map(preloadedMemoryMap)
       : new Map();
 
-    // Determine temporal/tag query params before I/O (pure computation).
-    const resultPaths = new Set(
-      results.map((r) => r.path).filter(Boolean) as string[],
+    await Promise.all(
+      results.map(async (r) => {
+        if (!r.path || memoryByPath.has(r.path)) return;
+        const mem = await this.readQmdResultMemory(r.path, this.storage);
+        if (mem) memoryByPath.set(r.path, mem);
+      }),
     );
-    let temporalFromDate: string | null = null;
-    let promptTags: string[] = [];
-    if (this.config.queryAwareIndexingEnabled && prompt) {
-      if (isTemporalQuery(prompt)) {
-        temporalFromDate = recencyWindowFromPrompt(prompt, now);
-      }
-      promptTags = extractTagsFromPrompt(prompt);
-    }
 
-    // Run all file I/O in parallel: memory files not yet preloaded + index files.
-    const [, rawTemporal, rawTags] = await Promise.all([
-      Promise.all(
-        results.map(async (r) => {
-          if (!r.path || memoryByPath.has(r.path)) return;
-          const mem = await this.readQmdResultMemory(r.path, this.storage);
-          if (mem) memoryByPath.set(r.path, mem);
-        }),
-      ),
-      temporalFromDate !== null
-        ? queryByDateRangeAsync(this.config.memoryDir, temporalFromDate)
-        : Promise.resolve<Set<string> | null>(null),
-      promptTags.length > 0
-        ? queryByTagsAsync(this.config.memoryDir, promptTags)
-        : Promise.resolve<Set<string> | null>(null),
-    ]);
+    return memoryByPath;
+  }
 
-    const queryIntent =
-      this.config.intentRoutingEnabled && prompt
-        ? inferIntentFromText(prompt)
-        : null;
-
-    // v8.1: Temporal + Tag prefilter candidate set
-    // Scope to result paths first so cross-namespace paths don't consume the cap.
-    let temporalCandidates: Set<string> | null = null;
-    let tagCandidates: Set<string> | null = null;
-    if (this.config.queryAwareIndexingEnabled && prompt) {
-      const maxCandidates = this.config.queryAwareIndexingMaxCandidates;
-      const capSet = (s: Set<string> | null): Set<string> | null => {
-        if (!s) return null;
-        // Intersect with result paths first so out-of-scope paths don't exhaust the budget
-        const scoped = new Set(Array.from(s).filter((p) => resultPaths.has(p)));
-        if (maxCandidates === 0 || scoped.size <= maxCandidates)
-          return scoped;
-        return new Set(Array.from(scoped).slice(0, maxCandidates));
-      };
-      if (temporalFromDate !== null) {
-        temporalCandidates = capSet(rawTemporal);
-      }
-      if (promptTags.length > 0) {
-        tagCandidates = capSet(rawTags);
-      }
-    }
-
+  private filterSearchResultsByRecallSafety(
+    results: QmdSearchResult[],
+    memoryByPath: Map<string, MemoryFile>,
+    options?: {
+      allowLifecycleFiltered?: boolean;
+      allowDedicatedSurface?: boolean;
+      asOfMs?: number;
+    },
+  ): QmdSearchResult[] {
     let lifecycleFilteredCount = 0;
     let temporalSupersededFilteredCount = 0;
     let dedicatedSurfaceFilteredCount = 0;
     let forgottenFilteredCount = 0;
-    const boosted: QmdSearchResult[] = [];
-    const recencyWeight = this.effectiveRecencyWeight();
+    const filtered: QmdSearchResult[] = [];
     for (const r of results) {
       const memory = memoryByPath.get(r.path);
-      let score = r.score;
-
       if (memory) {
         if (memory.frontmatter.status === "forgotten") {
           forgottenFilteredCount += 1;
@@ -16585,7 +16582,152 @@ export class Orchestrator {
           dedicatedSurfaceFilteredCount += 1;
           continue;
         }
+      }
+      filtered.push(r);
+    }
+    if (lifecycleFilteredCount > 0) {
+      log.debug(
+        `lifecycle retrieval filter removed ${lifecycleFilteredCount} stale/archived candidates`,
+      );
+    }
+    if (temporalSupersededFilteredCount > 0) {
+      log.debug(
+        `temporal supersession filter removed ${temporalSupersededFilteredCount} superseded candidates`,
+      );
+    }
+    if (dedicatedSurfaceFilteredCount > 0) {
+      log.debug(
+        `dedicated surface filter removed ${dedicatedSurfaceFilteredCount} dream/procedural candidates from generic recall`,
+      );
+    }
+    if (forgottenFilteredCount > 0) {
+      log.debug(
+        `forgotten status filter removed ${forgottenFilteredCount} candidates from recall`,
+      );
+    }
+    return filtered;
+  }
 
+  private async filterSearchResultsForRecall(
+    results: QmdSearchResult[],
+    preloadedMemoryMap?: Map<string, MemoryFile>,
+    options?: {
+      allowLifecycleFiltered?: boolean;
+      allowDedicatedSurface?: boolean;
+      asOfMs?: number;
+    },
+  ): Promise<{ results: QmdSearchResult[]; memoryByPath: Map<string, MemoryFile> }> {
+    if (results.length === 0) {
+      return {
+        results,
+        memoryByPath: preloadedMemoryMap ? new Map(preloadedMemoryMap) : new Map(),
+      };
+    }
+    const memoryByPath = await this.loadSearchResultMemoryMap(
+      results,
+      preloadedMemoryMap,
+    );
+    return {
+      results: this.filterSearchResultsByRecallSafety(
+        results,
+        memoryByPath,
+        options,
+      ),
+      memoryByPath,
+    };
+  }
+
+  /**
+   * Apply recency, access count, and importance boosting to QMD search results.
+   * Returns re-ranked results.
+   */
+  private async boostSearchResults(
+    results: QmdSearchResult[],
+    _recallNamespaces: string[],
+    prompt?: string,
+    preloadedMemoryMap?: Map<string, MemoryFile>,
+    options?: {
+      allowLifecycleFiltered?: boolean;
+      allowDedicatedSurface?: boolean;
+      /**
+       * Historical recall point in ms-since-epoch (issue #680).  When
+       * set, drops candidates that were not authoritative at this
+       * instant per `temporal-validity.isValidAsOf`.  Caller is
+       * responsible for parsing/validating the user-supplied ISO
+       * string at the input boundary (CLI / HTTP / MCP).
+       */
+      asOfMs?: number;
+    },
+  ): Promise<QmdSearchResult[]> {
+    if (results.length === 0) return results;
+
+    const safety = await this.filterSearchResultsForRecall(
+      results,
+      preloadedMemoryMap,
+      options,
+    );
+    const safeResults = safety.results;
+    const memoryByPath = safety.memoryByPath;
+    if (safeResults.length === 0) return safeResults;
+
+    const now = Date.now();
+
+    // Determine temporal/tag query params before index I/O (pure computation).
+    const resultPaths = new Set(
+      safeResults.map((r) => r.path).filter(Boolean) as string[],
+    );
+    let temporalFromDate: string | null = null;
+    let promptTags: string[] = [];
+    if (this.config.queryAwareIndexingEnabled && prompt) {
+      if (isTemporalQuery(prompt)) {
+        temporalFromDate = recencyWindowFromPrompt(prompt, now);
+      }
+      promptTags = extractTagsFromPrompt(prompt);
+    }
+
+    const [rawTemporal, rawTags] = await Promise.all([
+      temporalFromDate !== null
+        ? queryByDateRangeAsync(this.config.memoryDir, temporalFromDate)
+        : Promise.resolve<Set<string> | null>(null),
+      promptTags.length > 0
+        ? queryByTagsAsync(this.config.memoryDir, promptTags)
+        : Promise.resolve<Set<string> | null>(null),
+    ]);
+
+    const queryIntent =
+      this.config.intentRoutingEnabled && prompt
+        ? inferIntentFromText(prompt)
+        : null;
+
+    // v8.1: Temporal + Tag prefilter candidate set
+    // Scope to result paths first so cross-namespace paths don't consume the cap.
+    let temporalCandidates: Set<string> | null = null;
+    let tagCandidates: Set<string> | null = null;
+    if (this.config.queryAwareIndexingEnabled && prompt) {
+      const maxCandidates = this.config.queryAwareIndexingMaxCandidates;
+      const capSet = (s: Set<string> | null): Set<string> | null => {
+        if (!s) return null;
+        // Intersect with result paths first so out-of-scope paths don't exhaust the budget
+        const scoped = new Set(Array.from(s).filter((p) => resultPaths.has(p)));
+        if (maxCandidates === 0 || scoped.size <= maxCandidates)
+          return scoped;
+        return new Set(Array.from(scoped).slice(0, maxCandidates));
+      };
+      if (temporalFromDate !== null) {
+        temporalCandidates = capSet(rawTemporal);
+      }
+      if (promptTags.length > 0) {
+        tagCandidates = capSet(rawTags);
+      }
+    }
+
+    const boosted: QmdSearchResult[] = [];
+    const recencyWeight = this.effectiveRecencyWeight();
+    for (const r of safeResults) {
+      const memory = memoryByPath.get(r.path);
+      let score = r.score;
+
+      if (memory) {
         // Recency boost: exponential decay over 7 days
         if (recencyWeight > 0) {
           const createdAt = new Date(memory.frontmatter.created).getTime();
@@ -16729,26 +16871,6 @@ export class Orchestrator {
       }
 
       boosted.push({ ...r, score });
-    }
-    if (lifecycleFilteredCount > 0) {
-      log.debug(
-        `lifecycle retrieval filter removed ${lifecycleFilteredCount} stale/archived candidates`,
-      );
-    }
-    if (temporalSupersededFilteredCount > 0) {
-      log.debug(
-        `temporal supersession filter removed ${temporalSupersededFilteredCount} superseded candidates`,
-      );
-    }
-    if (dedicatedSurfaceFilteredCount > 0) {
-      log.debug(
-        `dedicated surface filter removed ${dedicatedSurfaceFilteredCount} dream/procedural candidates from generic recall`,
-      );
-    }
-    if (forgottenFilteredCount > 0) {
-      log.debug(
-        `forgotten status filter removed ${forgottenFilteredCount} candidates from recall`,
-      );
     }
 
     // Re-sort by boosted score
