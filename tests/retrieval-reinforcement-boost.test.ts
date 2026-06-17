@@ -288,6 +288,78 @@ test("boost resolves QMD collection-prefixed namespace result paths", async () =
   );
 });
 
+test("namespace detection decodes QMD collection-prefixed result paths", async () => {
+  const memoryDir = await makeTmpDir("engram-reinforce-qmd-ns-detect-");
+  const namespace = "team";
+  const orchestrator = await makeOrchestrator(memoryDir, {
+    namespacesEnabled: true,
+    defaultNamespace: "default",
+    sharedNamespace: "shared",
+    namespacePolicies: [
+      {
+        name: namespace,
+        readPrincipals: ["reader"],
+        writePrincipals: ["writer"],
+      },
+    ],
+    qmdCollection: "openclaw-engram",
+  });
+
+  const collection = `openclaw-engram--${namespaceIdentityToken(namespace)}`;
+
+  assert.equal(
+    (orchestrator as any).namespaceFromPath(
+      `${collection}/2026-06-16/fact-ns-001.md`,
+    ),
+    namespace,
+  );
+});
+
+test("namespace collection misses do not fall back to default storage", async () => {
+  const memoryDir = await makeTmpDir("engram-reinforce-qmd-ns-miss-");
+  const namespace = "team";
+  const defaultDayDir = path.join(memoryDir, "facts", "2026-06-16");
+  await mkdir(defaultDayDir, { recursive: true });
+  await writeMemory(defaultDayDir, "fact-ns-001", {
+    reinforcement_count: 9,
+  });
+
+  const orchestrator = await makeOrchestrator(memoryDir, {
+    namespacesEnabled: true,
+    defaultNamespace: "default",
+    sharedNamespace: "shared",
+    namespacePolicies: [
+      {
+        name: namespace,
+        readPrincipals: ["reader"],
+        writePrincipals: ["writer"],
+      },
+    ],
+    qmdCollection: "openclaw-engram",
+    reinforcementRecallBoostEnabled: true,
+    reinforcementRecallBoostWeight: 0.1,
+    reinforcementRecallBoostMax: 1.0,
+  });
+  (orchestrator as any).initPromise = null;
+
+  const collection = `openclaw-engram--${namespaceIdentityToken(namespace)}`;
+  const result = await (orchestrator as any).boostSearchResults(
+    [
+      {
+        docid: "fact-ns-001",
+        path: `${collection}/2026-06-16/fact-ns-001.md`,
+        snippet: "stale namespace hit",
+        score: 0.5,
+      },
+    ],
+    ["default", namespace],
+  );
+
+  assert.equal(result.length, 1);
+  assert.strictEqual(result[0].score, 0.5);
+  assert.strictEqual(result[0].explain?.reinforcementBoost, undefined);
+});
+
 test("recall safety filtering is available without running score boosts", async () => {
   const memoryDir = await makeTmpDir("engram-recall-safety-filter-");
   const factsDir = path.join(memoryDir, "facts");

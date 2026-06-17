@@ -15685,12 +15685,14 @@ export class Orchestrator {
           const memory = await collectionStorage.readMemoryByPath(candidate);
           if (memory) return memory;
         }
+        return null;
       } catch (err) {
         log.debug("qmd result namespace path lookup failed open", {
           path: resultPath,
           namespace: collectionNamespace,
           error: (err as Error).message,
         });
+        return null;
       }
     }
 
@@ -17161,6 +17163,11 @@ export class Orchestrator {
 
   private namespaceFromPath(p: string): string {
     if (!this.config.namespacesEnabled) return this.config.defaultNamespace;
+    const parts = qmdCollectionPathParts(p);
+    const collectionNamespace = parts
+      ? this.qmdCollectionNamespaceFromPrefix(parts.collection)
+      : null;
+    if (collectionNamespace) return collectionNamespace;
     const m = p.match(/[\\/]+namespaces[\\/]+([^\\/]+)(?:[\\/]|$)/);
     if (!m?.[1]) return this.config.defaultNamespace;
     return namespaceIdentityFromToken(m[1]) ?? m[1];
