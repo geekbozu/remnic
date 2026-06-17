@@ -710,6 +710,46 @@ async function raceRecallAbort<T>(
   }
 }
 
+function qmdCollectionPathParts(resultPath: string): {
+  collection: string;
+  relativePath: string;
+} | null {
+  if (!resultPath || path.isAbsolute(resultPath)) return null;
+  const normalized = resultPath.replace(/\\/g, "/").replace(/^\/+/, "");
+  const slashIndex = normalized.indexOf("/");
+  if (slashIndex <= 0 || slashIndex >= normalized.length - 1) return null;
+  return {
+    collection: normalized.slice(0, slashIndex),
+    relativePath: normalized.slice(slashIndex + 1),
+  };
+}
+
+function qmdResultPathCandidates(
+  storageDir: string,
+  resultPath: string,
+): string[] {
+  const candidates = new Set<string>();
+  const addRelativeCandidates = (relativePath: string) => {
+    const normalized = relativePath.replace(/\\/g, "/").replace(/^\/+/, "");
+    if (!normalized) return;
+    candidates.add(path.join(storageDir, normalized));
+    if (/^\d{4}-\d{2}-\d{2}\//.test(normalized)) {
+      candidates.add(path.join(storageDir, "facts", normalized));
+    }
+  };
+
+  if (path.isAbsolute(resultPath)) {
+    candidates.add(resultPath);
+  } else {
+    addRelativeCandidates(resultPath);
+  }
+
+  const parts = qmdCollectionPathParts(resultPath);
+  if (parts) addRelativeCandidates(parts.relativePath);
+
+  return [...candidates];
+}
+
 /** Maximum age (ms) before a compaction-reset signal file is considered stale and removed. */
 const COMPACTION_SIGNAL_MAX_AGE_MS = 60 * 60 * 1000; // 1 hour
 const DEFAULT_QMD_STARTUP_COLLECTION_CHECK_TIMEOUT_MS = 10_000;
@@ -5939,6 +5979,7 @@ export class Orchestrator {
     memoryResults: QmdSearchResult[];
     recallNamespaces: string[];
     recallResultLimit: number;
+    deadlineAtMs?: number | null;
     /** Issue #681 — when true, bypass graphTraversalConfidenceFloor. */
     includeLowConfidence?: boolean;
   }): Promise<{
@@ -5967,6 +6008,12 @@ export class Orchestrator {
     const expandedResults: QmdSearchResult[] = [];
 
     for (const [namespace, nsResults] of byNamespace.entries()) {
+      if (
+        typeof options.deadlineAtMs === "number" &&
+        Date.now() >= options.deadlineAtMs
+      ) {
+        break;
+      }
       const storage = await this.storageRouter.storageFor(namespace);
       const seedCandidates = nsResults.slice(0, perNamespaceSeedCap);
       seedResults.push(...seedCandidates);
@@ -5989,7 +6036,12 @@ export class Orchestrator {
       const expanded = await this.graphIndexFor(storage).spreadingActivation(
         seedRelativePaths,
         this.config.maxGraphTraversalSteps,
-        options.includeLowConfidence === true ? { includeLowConfidence: true } : undefined,
+        {
+          ...(options.includeLowConfidence === true ? { includeLowConfidence: true } : {}),
+          ...(typeof options.deadlineAtMs === "number"
+            ? { deadlineAtMs: options.deadlineAtMs }
+            : {}),
+        },
       );
       if (expanded.length === 0) continue;
 
@@ -8931,6 +8983,70 @@ export class Orchestrator {
       return finalizeEnrichmentOutcome(outcome);
     };
 
+    const remainingEnrichmentAssemblyMs = (): number | null =>
+      enrichmentAssemblyDeadlineAtMs === null
+        ? null
+        : Math.max(0, enrichmentAssemblyDeadlineAtMs - Date.now());
+
+    const awaitAssemblyStep = async <T>(
+      name: string,
+      task: () => Promise<T>,
+      fallback: T,
+    ): Promise<T> => {
+      if (options.abortSignal?.aborted) {
+        log.debug(
+          `recall phase-1 assembly [${name}]: skipped after abort at +${Date.now() - phase1Start}ms`,
+        );
+        return fallback;
+      }
+
+      const timeoutMs = remainingEnrichmentAssemblyMs();
+      if (timeoutMs === 0) {
+        log.debug(
+          `recall phase-1 assembly [${name}]: skipped after shared ${enrichmentSectionDeadlineMs}ms budget expired ` +
+            `at +${Date.now() - phase1Start}ms`,
+        );
+        return fallback;
+      }
+
+      let timeoutHandle: NodeJS.Timeout | undefined;
+      try {
+        const result = await (timeoutMs !== null
+          ? Promise.race<T | { status: "timed_out" }>([
+              task(),
+              new Promise<{ status: "timed_out" }>((resolve) => {
+                timeoutHandle = setTimeout(
+                  () => resolve({ status: "timed_out" }),
+                  timeoutMs,
+                );
+              }),
+            ])
+          : task());
+        if (timeoutHandle) clearTimeout(timeoutHandle);
+        if (
+          typeof result === "object" &&
+          result !== null &&
+          "status" in result &&
+          (result as { status?: unknown }).status === "timed_out"
+        ) {
+          log.debug(
+            `recall phase-1 assembly [${name}]: timed out within shared ${enrichmentSectionDeadlineMs}ms budget ` +
+              `at +${Date.now() - phase1Start}ms`,
+          );
+          return fallback;
+        }
+        return result as T;
+      } catch (err) {
+        if (timeoutHandle) clearTimeout(timeoutHandle);
+        log.warn(
+          `recall phase-1 assembly [${name}] failed open: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+        return fallback;
+      }
+    };
+
     // --- Phase 2: Assemble sections in correct order ---
     this.profiler.startSpan("assembly", profileTraceId);
 
@@ -9480,56 +9596,81 @@ export class Orchestrator {
           graphExpandedResultPaths.clear();
         } else {
           try {
-            const {
-              merged,
-              seedPaths,
-              expandedPaths,
-              seedResults = baselineMemoryResults,
-            } = await this.expandResultsViaGraph({
-              memoryResults,
-              recallNamespaces,
-              recallResultLimit,
-              ...(options.includeLowConfidence === true ? { includeLowConfidence: true } : {}),
-            });
-            graphSnapshotStatus = "completed";
-            graphDecisionStatus = "completed";
-            graphDecisionReason = graphShadowEvalEnabled
-              ? "graph shadow evaluation completed without altering injected context"
-              : "graph expansion merged into recall ranking";
-            graphSnapshotReason = graphDecisionReason;
-            graphSnapshotSeedPaths = seedPaths;
-            graphSnapshotExpandedPaths = expandedPaths;
-            graphSnapshotSeedResults = this.buildGraphRecallRankedResults(
-              seedResults,
-              () => ["baseline"],
+            const graphExpansion = await awaitAssemblyStep(
+              "graph-expansion",
+              () =>
+                this.expandResultsViaGraph({
+                  memoryResults,
+                  recallNamespaces,
+                  recallResultLimit,
+                  deadlineAtMs: enrichmentAssemblyDeadlineAtMs,
+                  ...(options.includeLowConfidence === true ? { includeLowConfidence: true } : {}),
+                }),
+              null as Awaited<ReturnType<typeof this.expandResultsViaGraph>> | null,
             );
-            graphExpandedResultPaths.clear();
-            expandedPaths.forEach((entry) =>
-              graphExpandedResultPaths.add(entry.path),
-            );
-            memoryResults = graphShadowEvalEnabled
-              ? baselineMemoryResults
-              : merged;
-
-            if (graphShadowEvalEnabled) {
-              const comparison = summarizeGraphShadowComparison(
+            if (!graphExpansion) {
+              graphSnapshotStatus = "aborted";
+              graphDecisionStatus = "aborted";
+              graphDecisionReason =
+                "graph expansion skipped because shared post-retrieval assembly budget expired";
+              graphSnapshotReason = graphDecisionReason;
+              graphSnapshotSeedPaths = baselineMemoryResults
+                .slice(0, Math.max(1, recallResultLimit))
+                .map((result) => result.path);
+              graphSnapshotSeedResults = this.buildGraphRecallRankedResults(
                 baselineMemoryResults,
-                merged,
-                recallResultLimit,
+                () => ["baseline"],
               );
-              graphSnapshotShadowComparison = comparison;
-              recordRecallSectionMetric({
-                section: "graphShadow",
-                priority: "enrichment",
-                durationMs: Date.now() - t0,
-                deadlineMs: enrichmentSectionDeadlineMs,
-                source: "fresh",
-                success: true,
-                timing:
-                  `on b=${comparison.baselineCount} g=${comparison.graphCount} ` +
-                  `ov=${comparison.overlapCount} (${comparison.overlapRatio.toFixed(2)}) ` +
-                  `avgDelta=${comparison.averageOverlapDelta.toFixed(3)}`,
-              });
+              graphSnapshotExpandedPaths = [];
+              graphExpandedResultPaths.clear();
+              memoryResults = baselineMemoryResults;
+            } else {
+              const {
+                merged,
+                seedPaths,
+                expandedPaths,
+                seedResults = baselineMemoryResults,
+              } = graphExpansion;
+              graphSnapshotStatus = "completed";
+              graphDecisionStatus = "completed";
+              graphDecisionReason = graphShadowEvalEnabled
+                ? "graph shadow evaluation completed without altering injected context"
+                : "graph expansion merged into recall ranking";
+              graphSnapshotReason = graphDecisionReason;
+              graphSnapshotSeedPaths = seedPaths;
+              graphSnapshotExpandedPaths = expandedPaths;
+              graphSnapshotSeedResults = this.buildGraphRecallRankedResults(
+                seedResults,
+                () => ["baseline"],
+              );
+              graphExpandedResultPaths.clear();
+              expandedPaths.forEach((entry) =>
+                graphExpandedResultPaths.add(entry.path),
+              );
+              memoryResults = graphShadowEvalEnabled
+                ? baselineMemoryResults
+                : merged;
+
+              if (graphShadowEvalEnabled) {
+                const comparison = summarizeGraphShadowComparison(
+                  baselineMemoryResults,
+                  merged,
+                  recallResultLimit,
+                );
+                graphSnapshotShadowComparison = comparison;
+                recordRecallSectionMetric({
+                  section: "graphShadow",
+                  priority: "enrichment",
+                  durationMs: Date.now() - t0,
+                  deadlineMs: enrichmentSectionDeadlineMs,
+                  source: "fresh",
+                  success: true,
+                  timing:
+                    `on b=${comparison.baselineCount} g=${comparison.graphCount} ` +
+                    `ov=${comparison.overlapCount} (${comparison.overlapRatio.toFixed(2)}) ` +
+                    `avgDelta=${comparison.averageOverlapDelta.toFixed(3)}`,
+                });
+              }
             }
           } catch (err) {
             graphSnapshotStatus = "aborted";
@@ -9552,12 +9693,17 @@ export class Orchestrator {
       }
 
       // Apply recency and access count boosting
-      memoryResults = await this.boostSearchResults(
+      memoryResults = await awaitAssemblyStep(
+        "qmd-boost",
+        () =>
+          this.boostSearchResults(
+            memoryResults,
+            recallNamespaces,
+            retrievalQuery,
+            undefined,
+            { asOfMs },
+          ),
         memoryResults,
-        recallNamespaces,
-        retrievalQuery,
-        undefined,
-        { asOfMs },
       );
 
       // Optional LLM reranking (default off). Fail-open if rerank fails/slow.
@@ -9811,6 +9957,7 @@ export class Orchestrator {
             queryAwarePrefilter,
             abortSignal: options.abortSignal,
             xrayPoolSizeSink: xrayColdPoolSink,
+            deadlineAtMs: enrichmentAssemblyDeadlineAtMs,
             asOfMs,
             ...(options.includeLowConfidence === true ? { includeLowConfidence: true } : {}),
           });
@@ -10023,6 +10170,7 @@ export class Orchestrator {
               queryAwarePrefilter,
               abortSignal: options.abortSignal,
               xrayPoolSizeSink: xrayColdPoolSink,
+              deadlineAtMs: enrichmentAssemblyDeadlineAtMs,
               asOfMs,
               ...(options.includeLowConfidence === true ? { includeLowConfidence: true } : {}),
             });
@@ -10125,6 +10273,7 @@ export class Orchestrator {
                 queryAwarePrefilter,
                 abortSignal: options.abortSignal,
                 xrayPoolSizeSink: xrayColdPoolSink,
+                deadlineAtMs: enrichmentAssemblyDeadlineAtMs,
                 asOfMs,
                 ...(options.includeLowConfidence === true ? { includeLowConfidence: true } : {}),
               });
@@ -10168,6 +10317,7 @@ export class Orchestrator {
             queryAwarePrefilter,
             abortSignal: options.abortSignal,
             xrayPoolSizeSink: xrayColdPoolSink,
+            deadlineAtMs: enrichmentAssemblyDeadlineAtMs,
             asOfMs,
             ...(options.includeLowConfidence === true ? { includeLowConfidence: true } : {}),
           });
@@ -15482,6 +15632,62 @@ export class Orchestrator {
    *
    * Callers must pass the full candidate pool (post-rerank, pre-slice).
    */
+  private qmdCollectionNamespaceFromPrefix(collectionPrefix: string): string | null {
+    const baseCollection = this.config.qmdCollection;
+    if (collectionPrefix === baseCollection) return this.config.defaultNamespace;
+    const namespaceSuffix = collectionPrefix.startsWith(`${baseCollection}--`)
+      ? collectionPrefix.slice(baseCollection.length + 2)
+      : "";
+    if (!namespaceSuffix) return null;
+
+    const decoded = namespaceIdentityFromToken(namespaceSuffix);
+    if (decoded !== null) return decoded || this.config.defaultNamespace;
+    if (namespaceSuffix.startsWith("ns--")) {
+      const legacyNamespace = namespaceSuffix.slice("ns--".length).trim();
+      return legacyNamespace || null;
+    }
+    return null;
+  }
+
+  private async readQmdResultMemory(
+    resultPath: string,
+    fallbackStorage: StorageManager,
+  ): Promise<MemoryFile | null> {
+    const parts = qmdCollectionPathParts(resultPath);
+    const collectionNamespace = parts
+      ? this.qmdCollectionNamespaceFromPrefix(parts.collection)
+      : null;
+
+    if (parts && collectionNamespace) {
+      try {
+        const collectionStorage =
+          await this.storageRouter.storageFor(collectionNamespace);
+        for (const candidate of qmdResultPathCandidates(
+          collectionStorage.dir,
+          parts.relativePath,
+        )) {
+          const memory = await collectionStorage.readMemoryByPath(candidate);
+          if (memory) return memory;
+        }
+      } catch (err) {
+        log.debug("qmd result namespace path lookup failed open", {
+          path: resultPath,
+          namespace: collectionNamespace,
+          error: (err as Error).message,
+        });
+      }
+    }
+
+    for (const candidate of qmdResultPathCandidates(
+      fallbackStorage.dir,
+      resultPath,
+    )) {
+      const memory = await fallbackStorage.readMemoryByPath(candidate);
+      if (memory) return memory;
+    }
+    return null;
+  }
+
   private async applyMemoryWorthRerank(
     results: QmdSearchResult[],
     namespaces: string[],
@@ -15557,7 +15763,7 @@ export class Orchestrator {
       if (reader) {
         for (const r of missing) {
           try {
-            const memory = await reader.readMemoryByPath(r.path);
+            const memory = await this.readQmdResultMemory(r.path, reader);
             if (!memory) continue;
             const fm = memory.frontmatter;
             if (fm.mw_success === undefined && fm.mw_fail === undefined) continue;
@@ -15973,6 +16179,7 @@ export class Orchestrator {
      * Unset by default so existing call sites are unaffected.
      */
     xrayPoolSizeSink?: { size: number };
+    deadlineAtMs?: number | null;
     /** Issue #681 — when true, bypass graphTraversalConfidenceFloor. */
     includeLowConfidence?: boolean;
   }): Promise<QmdSearchResult[]> {
@@ -16059,6 +16266,7 @@ export class Orchestrator {
         memoryResults: results,
         recallNamespaces: options.recallNamespaces,
         recallResultLimit: options.recallResultLimit,
+        deadlineAtMs: options.deadlineAtMs,
         ...(options.includeLowConfidence === true ? { includeLowConfidence: true } : {}),
       });
       results = merged;
@@ -16267,7 +16475,7 @@ export class Orchestrator {
       Promise.all(
         results.map(async (r) => {
           if (!r.path || memoryByPath.has(r.path)) return;
-          const mem = await this.storage.readMemoryByPath(r.path);
+          const mem = await this.readQmdResultMemory(r.path, this.storage);
           if (mem) memoryByPath.set(r.path, mem);
         }),
       ),

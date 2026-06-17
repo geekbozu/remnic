@@ -662,3 +662,38 @@ describe("Integration: corrupt JSONL fail-open", () => {
     }
   });
 });
+
+describe("GraphIndex.spreadingActivation — assembly deadlines", () => {
+  const cfg = {
+    multiGraphMemoryEnabled: true,
+    entityGraphEnabled: true,
+    timeGraphEnabled: true,
+    causalGraphEnabled: false,
+    maxGraphTraversalSteps: 3,
+    graphActivationDecay: 0.7,
+    maxEntityGraphEdgesPerMemory: 10,
+  } as unknown as GraphConfig;
+
+  it("returns [] immediately when the traversal deadline is already expired", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "engram-sa-deadline-"));
+    try {
+      const gi = new GraphIndex(dir, cfg);
+      await appendEdge(dir, {
+        from: "A.md",
+        to: "B.md",
+        type: "entity",
+        weight: 1.0,
+        label: "deadline",
+        ts: new Date().toISOString(),
+      });
+      const startedAt = Date.now();
+      const results = await gi.spreadingActivation(["A.md"], 3, {
+        deadlineAtMs: startedAt - 1,
+      });
+      assert.deepEqual(results, []);
+      assert.ok(Date.now() - startedAt < 100, "expired deadline should fail open quickly");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});

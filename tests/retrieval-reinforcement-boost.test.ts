@@ -27,6 +27,12 @@ async function makeTmpDir(prefix: string): Promise<string> {
   return mkdtemp(path.join(os.tmpdir(), prefix));
 }
 
+function namespaceIdentityToken(namespace: string): string {
+  const bytes = new TextEncoder().encode(namespace.trim());
+  const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  return `ns-${hex || "default"}`;
+}
+
 async function makeOrchestrator(
   memoryDir: string,
   overrides: Record<string, unknown> = {},
@@ -223,6 +229,62 @@ test("boost applied when feature on and memory has reinforcement_count", async (
   assert.ok(
     Math.abs((result[0].explain?.reinforcementBoost ?? 0) - 0.3) < 1e-9,
     `expected reinforcementBoost ≈ 0.3 but got ${result[0].explain?.reinforcementBoost}`,
+  );
+});
+
+test("boost resolves QMD collection-prefixed namespace result paths", async () => {
+  const memoryDir = await makeTmpDir("engram-reinforce-qmd-ns-");
+  const namespace = "team";
+  const namespaceDir = path.join(
+    memoryDir,
+    "namespaces",
+    namespaceIdentityToken(namespace),
+  );
+  const dayDir = path.join(namespaceDir, "facts", "2026-06-16");
+  await mkdir(dayDir, { recursive: true });
+  await writeMemory(dayDir, "fact-ns-001", {
+    reinforcement_count: 2,
+  });
+
+  const orchestrator = await makeOrchestrator(memoryDir, {
+    namespacesEnabled: true,
+    defaultNamespace: "default",
+    sharedNamespace: "shared",
+    namespacePolicies: [
+      {
+        name: namespace,
+        readPrincipals: ["reader"],
+        writePrincipals: ["writer"],
+      },
+    ],
+    qmdCollection: "openclaw-engram",
+    reinforcementRecallBoostEnabled: true,
+    reinforcementRecallBoostWeight: 0.1,
+    reinforcementRecallBoostMax: 1.0,
+  });
+  (orchestrator as any).initPromise = null;
+
+  const collection = `openclaw-engram--${namespaceIdentityToken(namespace)}`;
+  const result = await (orchestrator as any).boostSearchResults(
+    [
+      {
+        docid: "fact-ns-001",
+        path: `${collection}/2026-06-16/fact-ns-001.md`,
+        snippet: "test",
+        score: 0.5,
+      },
+    ],
+    ["default", namespace],
+  );
+
+  assert.equal(result.length, 1);
+  assert.ok(
+    Math.abs(result[0].score - 0.7) < 1e-9,
+    `expected score ≈ 0.7 but got ${result[0].score}`,
+  );
+  assert.ok(
+    Math.abs((result[0].explain?.reinforcementBoost ?? 0) - 0.2) < 1e-9,
+    `expected reinforcementBoost ≈ 0.2 but got ${result[0].explain?.reinforcementBoost}`,
   );
 });
 

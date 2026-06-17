@@ -54,6 +54,7 @@ import {
 } from "./memory-lifecycle-ledger-utils.js";
 import { getMemoryProjectionPath } from "./memory-projection-store.js";
 import { canReadNamespace, canWriteNamespace, defaultNamespaceForPrincipal, recallNamespacesForPrincipal, resolvePrincipal } from "./namespaces/principal.js";
+import { namespaceIdentityFromToken } from "./namespaces/identity.js";
 import { namespaceCollectionName } from "./namespaces/search.js";
 import type { LastRecallSnapshot } from "./recall-state.js";
 import type {
@@ -167,6 +168,46 @@ import {
 import { formatProfileTraceAscii } from "./profiling.js";
 
 export class EngramAccessInputError extends Error {}
+
+function qmdCollectionPathParts(resultPath: string): {
+  collection: string;
+  relativePath: string;
+} | null {
+  if (!resultPath || nodePath.isAbsolute(resultPath)) return null;
+  const normalized = resultPath.replace(/\\/g, "/").replace(/^\/+/, "");
+  const slashIndex = normalized.indexOf("/");
+  if (slashIndex <= 0 || slashIndex >= normalized.length - 1) return null;
+  return {
+    collection: normalized.slice(0, slashIndex),
+    relativePath: normalized.slice(slashIndex + 1),
+  };
+}
+
+function qmdResultPathCandidates(
+  storageDir: string,
+  resultPath: string,
+): string[] {
+  const candidates = new Set<string>();
+  const addRelativeCandidates = (relativePath: string) => {
+    const normalized = relativePath.replace(/\\/g, "/").replace(/^\/+/, "");
+    if (!normalized) return;
+    candidates.add(nodePath.join(storageDir, normalized));
+    if (/^\d{4}-\d{2}-\d{2}\//.test(normalized)) {
+      candidates.add(nodePath.join(storageDir, "facts", normalized));
+    }
+  };
+
+  if (nodePath.isAbsolute(resultPath)) {
+    candidates.add(resultPath);
+  } else {
+    addRelativeCandidates(resultPath);
+  }
+
+  const parts = qmdCollectionPathParts(resultPath);
+  if (parts) addRelativeCandidates(parts.relativePath);
+
+  return [...candidates];
+}
 
 type AccessProfilingReportRequest = {
   format?: string;
@@ -1502,6 +1543,50 @@ export class EngramAccessService {
     const storageDir = storage.dir;
     const results: EngramAccessMemorySummary[] = [];
     const seen = new Set<string>();
+    const collectionNamespaceFromPrefix = (collectionPrefix: string): string | null => {
+      const baseCollection = this.orchestrator.config.qmdCollection;
+      if (collectionPrefix === baseCollection) return this.orchestrator.config.defaultNamespace;
+      const namespaceSuffix = collectionPrefix.startsWith(`${baseCollection}--`)
+        ? collectionPrefix.slice(baseCollection.length + 2)
+        : "";
+      if (!namespaceSuffix) return null;
+
+      const decoded = namespaceIdentityFromToken(namespaceSuffix);
+      if (decoded !== null) return decoded || this.orchestrator.config.defaultNamespace;
+      if (namespaceSuffix.startsWith("ns--")) {
+        const legacyNamespace = namespaceSuffix.slice("ns--".length).trim();
+        return legacyNamespace || null;
+      }
+      return null;
+    };
+    const readResultPath = async (memoryPath: string): Promise<MemoryFile | null> => {
+      const parts = qmdCollectionPathParts(memoryPath);
+      const collectionNamespace = parts
+        ? collectionNamespaceFromPrefix(parts.collection)
+        : null;
+
+      if (parts && collectionNamespace) {
+        try {
+          const collectionStorage =
+            await this.orchestrator.getStorage(collectionNamespace);
+          for (const candidate of qmdResultPathCandidates(
+            collectionStorage.dir,
+            parts.relativePath,
+          )) {
+            const memory = await collectionStorage.readMemoryByPath(candidate);
+            if (memory) return memory;
+          }
+        } catch {
+          // Fall through to the snapshot namespace candidates.
+        }
+      }
+
+      for (const candidate of qmdResultPathCandidates(storageDir, memoryPath)) {
+        const memory = await storage.readMemoryByPath(candidate);
+        if (memory) return memory;
+      }
+      return null;
+    };
 
     // Pre-fetch raw excerpts once when `disclosure === "raw"` so we don't
     // hit the LCM archive per-result (issue #677 PR 2/4).  Excerpts are
@@ -1519,7 +1604,7 @@ export class EngramAccessService {
 
     for (const memoryPath of snapshot.resultPaths ?? []) {
       if (!memoryPath || seen.has(memoryPath)) continue;
-      const memory = await storage.readMemoryByPath(memoryPath);
+      const memory = await readResultPath(memoryPath);
       if (!memory) continue;
       seen.add(memoryPath);
       results.push(
