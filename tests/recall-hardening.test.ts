@@ -920,3 +920,51 @@ test("cold fallback deadline stops before cold QMD and archive scanning", async 
   assert.equal(coldQmdReads, 0);
   assert.equal(archiveReads, 0);
 });
+
+test("cold fallback resolves QMD cold collection-prefixed result paths", async () => {
+  const orchestrator = await makeOrchestrator("engram-cold-fallback-qmd-prefix-", {
+    qmdColdTierEnabled: true,
+    qmdEnabled: true,
+    qmdColdCollection: "openclaw-engram-cold",
+  });
+  const storage = (orchestrator as any).storage;
+  const memoryId = await storage.writeMemory(
+    "fact",
+    "cold collection-prefixed memory",
+  );
+  const hotMemory = await storage.getMemoryById(memoryId);
+  assert.ok(hotMemory);
+  const migrated = await storage.migrateMemoryToTier(hotMemory, "cold");
+  const coldRelativePath = path
+    .relative(path.join(storage.dir, "cold"), migrated.targetPath)
+    .split(path.sep)
+    .join("/");
+  const coldCollectionPath = `openclaw-engram-cold/${coldRelativePath}`;
+
+  let archiveReads = 0;
+  (orchestrator as any).qmd = { isAvailable: () => true };
+  (orchestrator as any).fetchQmdMemoryResultsWithArtifactTopUp = async () => [
+    {
+      docid: hotMemory.frontmatter.id,
+      path: coldCollectionPath,
+      snippet: "cold collection-prefixed memory",
+      score: 0.91,
+    },
+  ];
+  (orchestrator as any).readArchivedMemoriesForNamespaces = async () => {
+    archiveReads += 1;
+    return [];
+  };
+
+  const results = await (orchestrator as any).applyColdFallbackPipeline({
+    prompt: "cold collection prefix test",
+    recallNamespaces: ["default"],
+    recallResultLimit: 5,
+    recallMode: "minimal",
+  });
+
+  assert.equal(archiveReads, 0);
+  assert.equal(results.length, 1);
+  assert.equal(results[0].docid, hotMemory.frontmatter.id);
+  assert.equal(results[0].path, coldCollectionPath);
+});

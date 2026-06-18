@@ -6017,23 +6017,33 @@ export class Orchestrator {
     const seedResults: QmdSearchResult[] = [];
     const expandedPaths: GraphRecallExpandedEntry[] = [];
     const expandedResults: QmdSearchResult[] = [];
+    const deadlineExpired = (): boolean =>
+      typeof options.deadlineAtMs === "number" &&
+      Date.now() >= options.deadlineAtMs;
 
     for (const [namespace, nsResults] of byNamespace.entries()) {
-      if (
-        typeof options.deadlineAtMs === "number" &&
-        Date.now() >= options.deadlineAtMs
-      ) {
-        break;
-      }
+      if (deadlineExpired()) break;
       const storage = await this.storageRouter.storageFor(namespace);
       const seedCandidates = nsResults.slice(0, perNamespaceSeedCap);
       seedResults.push(...seedCandidates);
-      const seedRelativePaths = seedCandidates
-        .map((result) => graphPathRelativeToStorage(storage.dir, result.path))
-        .filter(
-          (value): value is string =>
-            typeof value === "string" && value.length > 0,
-        );
+      const seedRelativePaths =
+        typeof options.deadlineAtMs === "number"
+          ? await this.graphSeedPathsWithinDeadline(
+              storage,
+              seedCandidates,
+              options.deadlineAtMs,
+            )
+          : (
+              await Promise.all(
+                seedCandidates.map((result) =>
+                  this.graphSeedPathRelativeToStorage(storage, result),
+                ),
+              )
+            ).filter(
+              (value): value is string =>
+                typeof value === "string" && value.length > 0,
+            );
+      if (deadlineExpired()) break;
       if (seedRelativePaths.length === 0) continue;
 
       const seedRecallScore = seedCandidates.reduce(
@@ -6055,11 +6065,14 @@ export class Orchestrator {
         },
       );
       if (expanded.length === 0) continue;
+      if (deadlineExpired()) break;
 
       for (const candidate of expanded.slice(0, perNamespaceExpandedCap)) {
+        if (deadlineExpired()) break;
         if (seedSet.has(candidate.path)) continue;
         const memoryPath = path.resolve(storage.dir, candidate.path);
         const memory = await storage.readMemoryByPath(memoryPath);
+        if (deadlineExpired()) break;
         if (!memory) continue;
         if (isArtifactMemoryPath(memory.path)) continue;
         if (memory.frontmatter.status && memory.frontmatter.status !== "active")
@@ -15694,6 +15707,28 @@ export class Orchestrator {
     fallbackStorage: StorageManager,
   ): Promise<MemoryFile | null> {
     const parts = qmdCollectionPathParts(resultPath);
+    const coldCollection = this.config.qmdColdCollection;
+    if (parts && parts.collection === coldCollection) {
+      try {
+        const coldStorage = new StorageManager(path.join(fallbackStorage.dir, "cold"));
+        for (const candidate of qmdResultPathCandidates(
+          coldStorage.dir,
+          parts.relativePath,
+        )) {
+          const memory = await coldStorage.readMemoryByPath(candidate);
+          if (memory) return memory;
+        }
+        return null;
+      } catch (err) {
+        if (err instanceof SecureStoreLockedError) throw err;
+        log.debug("qmd cold result path lookup failed open", {
+          path: resultPath,
+          collection: coldCollection,
+          error: (err as Error).message,
+        });
+        return null;
+      }
+    }
     const collectionNamespace = parts
       ? this.qmdCollectionNamespaceFromPrefix(parts.collection)
       : null;
@@ -17357,6 +17392,35 @@ export class Orchestrator {
       strength: link.strength,
       reason: link.reason || undefined,
     }));
+  }
+
+  private async graphSeedPathRelativeToStorage(
+    storage: StorageManager,
+    result: QmdSearchResult,
+  ): Promise<string | null> {
+    const parts = qmdCollectionPathParts(result.path);
+    if (parts) {
+      const memory = await this.readQmdResultMemory(result.path, storage);
+      return memory
+        ? graphPathRelativeToStorage(storage.dir, memory.path)
+        : null;
+    }
+    return graphPathRelativeToStorage(storage.dir, result.path);
+  }
+
+  private async graphSeedPathsWithinDeadline(
+    storage: StorageManager,
+    results: QmdSearchResult[],
+    deadlineAtMs: number,
+  ): Promise<string[]> {
+    const resolved: string[] = [];
+    for (const result of results) {
+      if (Date.now() >= deadlineAtMs) break;
+      const seedPath = await this.graphSeedPathRelativeToStorage(storage, result);
+      if (Date.now() >= deadlineAtMs) break;
+      if (seedPath) resolved.push(seedPath);
+    }
+    return resolved;
   }
 
   private namespaceFromPath(p: string): string {
