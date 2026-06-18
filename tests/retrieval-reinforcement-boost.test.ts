@@ -510,6 +510,45 @@ test("recall safety filtering is available without running score boosts", async 
   );
 });
 
+test("absolute QMD result paths read through dynamic namespace owner storage", async () => {
+  const memoryDir = await makeTmpDir("engram-recall-absolute-dynamic-ns-");
+  const dynamicNamespace = "team-project-alpha";
+  const dynamicFactsDir = path.join(
+    memoryDir,
+    "namespaces",
+    namespaceIdentityToken(dynamicNamespace),
+    "facts",
+  );
+  await mkdir(dynamicFactsDir, { recursive: true });
+  const ownedPath = await writeMemory(dynamicFactsDir, "fact-owned");
+
+  const orchestrator = await makeOrchestrator(memoryDir, {
+    namespacesEnabled: true,
+    defaultNamespace: "default",
+    sharedNamespace: "shared",
+    namespacePolicies: [],
+  });
+  (orchestrator as any).initPromise = null;
+
+  const fallbackStorage = await (orchestrator as any).storageRouter.storageFor(
+    "default",
+  );
+  let fallbackReads = 0;
+  fallbackStorage.readMemoryByPath = async () => {
+    fallbackReads += 1;
+    return null;
+  };
+
+  const memory = await (orchestrator as any).readQmdResultMemory(
+    ownedPath,
+    fallbackStorage,
+  );
+
+  assert.equal(fallbackReads, 0);
+  assert.equal(memory?.path, ownedPath);
+  assert.equal(memory?.frontmatter.id, "fact-owned");
+});
+
 test("recall safety filtering does not return unchecked results after deadline", async () => {
   const memoryDir = await makeTmpDir("engram-recall-safety-deadline-");
   const factsDir = path.join(memoryDir, "facts");

@@ -15720,6 +15720,22 @@ export class Orchestrator {
       }
     }
 
+    if (path.isAbsolute(resultPath)) {
+      const ownerStorage = await this.storageForAbsoluteQmdResultPath(
+        resultPath,
+        fallbackStorage,
+      );
+      if (!ownerStorage) return null;
+      for (const candidate of qmdResultPathCandidates(
+        ownerStorage.dir,
+        resultPath,
+      )) {
+        const memory = await ownerStorage.storage.readMemoryByPath(candidate);
+        if (memory) return memory;
+      }
+      return null;
+    }
+
     for (const candidate of qmdResultPathCandidates(
       fallbackStorage.dir,
       resultPath,
@@ -15728,6 +15744,61 @@ export class Orchestrator {
       if (memory) return memory;
     }
     return null;
+  }
+
+  private async storageForAbsoluteQmdResultPath(
+    resultPath: string,
+    fallbackStorage: StorageManager,
+  ): Promise<{ storage: StorageManager; dir: string } | null> {
+    const resolvedPath = path.resolve(resultPath);
+    const memoryRoot = path.resolve(this.config.memoryDir);
+    const namespacesRoot = path.join(memoryRoot, "namespaces");
+    const matches: Array<{ storage: StorageManager; dir: string }> = [];
+    const seenDirs = new Set<string>();
+
+    const maybeAddStorage = (storage: StorageManager) => {
+      const candidateRoot = path.resolve(storage.dir);
+      if (seenDirs.has(candidateRoot)) return;
+      if (!isPathInsideStorageRoot(candidateRoot, resolvedPath)) return;
+      if (
+        candidateRoot === memoryRoot &&
+        isPathInsideStorageRoot(namespacesRoot, resolvedPath)
+      ) {
+        return;
+      }
+      seenDirs.add(candidateRoot);
+      matches.push({ storage, dir: candidateRoot });
+    };
+
+    maybeAddStorage(fallbackStorage);
+
+    const candidateNamespaces = new Set<string>();
+    candidateNamespaces.add(this.config.defaultNamespace);
+    candidateNamespaces.add(this.config.sharedNamespace);
+    if (isPathInsideStorageRoot(namespacesRoot, resolvedPath)) {
+      const relativeToNamespaces = path.relative(namespacesRoot, resolvedPath);
+      const [namespaceSegment] = relativeToNamespaces.split(/[\\/]/);
+      if (namespaceSegment) {
+        candidateNamespaces.add(
+          namespaceIdentityFromToken(namespaceSegment) ?? namespaceSegment,
+        );
+      }
+    }
+    for (const policy of this.config.namespacePolicies ?? []) {
+      candidateNamespaces.add(policy.name);
+    }
+
+    for (const ns of candidateNamespaces) {
+      if (!ns) continue;
+      try {
+        maybeAddStorage(await this.storageRouter.storageFor(ns));
+      } catch {
+        continue;
+      }
+    }
+
+    matches.sort((a, b) => b.dir.length - a.dir.length);
+    return matches[0] ?? null;
   }
 
   private async applyMemoryWorthRerank(
