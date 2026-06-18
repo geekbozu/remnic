@@ -15707,10 +15707,15 @@ export class Orchestrator {
     fallbackStorage: StorageManager,
   ): Promise<MemoryFile | null> {
     const parts = qmdCollectionPathParts(resultPath);
+    const fallbackStorageDir =
+      typeof (fallbackStorage as { dir?: unknown }).dir === "string" &&
+      (fallbackStorage as { dir?: string }).dir
+        ? (fallbackStorage as { dir: string }).dir
+        : null;
     const coldCollection = this.config.qmdColdCollection;
-    if (parts && parts.collection === coldCollection) {
+    if (parts && parts.collection === coldCollection && fallbackStorageDir) {
       try {
-        const coldStorage = new StorageManager(path.join(fallbackStorage.dir, "cold"));
+        const coldStorage = new StorageManager(path.join(fallbackStorageDir, "cold"));
         for (const candidate of qmdResultPathCandidates(
           coldStorage.dir,
           parts.relativePath,
@@ -15757,6 +15762,9 @@ export class Orchestrator {
     }
 
     if (path.isAbsolute(resultPath)) {
+      if (!fallbackStorageDir) {
+        return await fallbackStorage.readMemoryByPath(resultPath);
+      }
       const ownerStorage = await this.storageForAbsoluteQmdResultPath(
         resultPath,
         fallbackStorage,
@@ -15772,8 +15780,11 @@ export class Orchestrator {
       return null;
     }
 
+    if (!fallbackStorageDir) {
+      return await fallbackStorage.readMemoryByPath(resultPath);
+    }
     for (const candidate of qmdResultPathCandidates(
-      fallbackStorage.dir,
+      fallbackStorageDir,
       resultPath,
     )) {
       const memory = await fallbackStorage.readMemoryByPath(candidate);
@@ -15793,7 +15804,13 @@ export class Orchestrator {
     const seenDirs = new Set<string>();
 
     const maybeAddStorage = (storage: StorageManager) => {
-      const candidateRoot = path.resolve(storage.dir);
+      const storageDir =
+        typeof (storage as { dir?: unknown }).dir === "string" &&
+        (storage as { dir?: string }).dir
+          ? (storage as { dir: string }).dir
+          : null;
+      if (!storageDir) return;
+      const candidateRoot = path.resolve(storageDir);
       if (seenDirs.has(candidateRoot)) return;
       if (!isPathInsideStorageRoot(candidateRoot, resolvedPath)) return;
       if (

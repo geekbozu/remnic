@@ -312,6 +312,13 @@ test("cold-tier recall forwards explain traces even when intent hints are disabl
     qmdIntentHintsEnabled: false,
   });
   const orchestrator = new Orchestrator(cfg) as any;
+  const memoryId = await orchestrator.storage.writeMemory(
+    "fact",
+    "cold explain trace memory",
+  );
+  const memory = await orchestrator.storage.getMemoryById(memoryId);
+  assert.ok(memory);
+  const migrated = await orchestrator.storage.migrateMemoryToTier(memory, "cold");
 
   let capturedOptions: Record<string, unknown> | undefined;
   orchestrator.qmd = {
@@ -326,9 +333,9 @@ test("cold-tier recall forwards explain traces even when intent hints are disabl
     capturedOptions = options.searchOptions;
     return [
       {
-        docid: "fact-1",
-        path: "facts/2026-03-11/fact-1.md",
-        snippet: "fact one",
+        docid: memory.frontmatter.id,
+        path: migrated.targetPath,
+        snippet: "cold explain trace memory",
         score: 0.9,
       },
     ];
