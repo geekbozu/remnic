@@ -151,6 +151,88 @@ test("buildXraySnapshot: tags field is preserved on RecallXrayResult", () => {
   assert.deepEqual(snapshot.results[0].tags, ["alice", "location"]);
 });
 
+test("serializeRecallResults resolves cold collection paths through recorded recall namespaces", async () => {
+  const memoryDir = await mkdtemp(path.join(os.tmpdir(), "engram-access-cold-recall-"));
+  const defaultDir = path.join(memoryDir, "default");
+  const projectDir = path.join(memoryDir, "project-cold");
+  const coldPath = path.join(
+    projectDir,
+    "cold",
+    "facts",
+    "2026-03-11",
+    "fact-cold.md",
+  );
+  const memory = {
+    path: coldPath,
+    content: "project cold recall memory",
+    frontmatter: {
+      id: "fact-cold",
+      category: "fact",
+      created: "2026-03-11T12:00:00.000Z",
+      updated: "2026-03-11T12:00:00.000Z",
+      source: "extraction",
+      confidence: 0.8,
+      confidenceTier: "confident",
+    },
+  };
+  const storageFor = (dir: string, readablePath?: string) => ({
+    dir,
+    readMemoryByPath: async (candidatePath: string) =>
+      readablePath && path.resolve(candidatePath) === path.resolve(readablePath)
+        ? memory
+        : null,
+    getMemoryById: async () => null,
+    getMemoryTimeline: async () => [],
+  });
+  const storages = new Map<string, ReturnType<typeof storageFor>>([
+    ["default", storageFor(defaultDir)],
+    ["shared", storageFor(path.join(memoryDir, "shared"))],
+    ["project-cold", storageFor(projectDir, coldPath)],
+  ]);
+  const orchestrator = {
+    config: {
+      memoryDir,
+      namespacesEnabled: true,
+      defaultNamespace: "default",
+      sharedNamespace: "shared",
+      namespacePolicies: [],
+      defaultRecallNamespaces: ["default"],
+      qmdCollection: "openclaw-engram",
+      qmdColdCollection: "openclaw-engram-cold",
+      recallCrossNamespaceBudgetEnabled: false,
+      recallCrossNamespaceBudgetWindowMs: 60_000,
+      recallCrossNamespaceBudgetSoftLimit: 10,
+      recallCrossNamespaceBudgetHardLimit: 20,
+      recallAuditAnomalyDetectionEnabled: false,
+    },
+    getStorage: async (namespace: string) => {
+      const storage = storages.get(namespace);
+      if (!storage) throw new Error(`missing storage: ${namespace}`);
+      return storage;
+    },
+    lcmEngine: null,
+  };
+  const service = new EngramAccessService(orchestrator as never) as any;
+
+  const results = await service.serializeRecallResults(
+    {
+      sessionKey: "session-1",
+      recordedAt: "2026-03-11T12:00:00.000Z",
+      queryHash: "hash",
+      queryLen: 5,
+      memoryIds: ["fact-cold"],
+      namespace: "default",
+      recallNamespaces: ["project-cold"],
+      resultPaths: ["openclaw-engram-cold/facts/2026-03-11/fact-cold.md"],
+    },
+    "chunk",
+  );
+
+  assert.equal(results.length, 1);
+  assert.equal(results[0].id, "fact-cold");
+  assert.equal(results[0].path, coldPath);
+});
+
 test("buildXraySnapshot: tags field is absent when not provided", () => {
   const result = fakeXrayResult({
     memoryId: "fact-2",

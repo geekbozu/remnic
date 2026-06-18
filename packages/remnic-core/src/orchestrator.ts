@@ -6000,15 +6000,40 @@ export class Orchestrator {
     seedResults: QmdSearchResult[];
   }> {
     const byNamespace = new Map<string, QmdSearchResult[]>();
-    for (const result of options.memoryResults) {
-      const ns = this.namespaceFromPath(result.path);
-      if (!options.recallNamespaces.includes(ns)) continue;
-      const existing = byNamespace.get(ns);
+    const addResultForNamespace = (
+      namespace: string,
+      result: QmdSearchResult,
+    ): void => {
+      const existing = byNamespace.get(namespace);
       if (existing) {
         existing.push(result);
       } else {
-        byNamespace.set(ns, [result]);
+        byNamespace.set(namespace, [result]);
       }
+    };
+    const coldCollection = this.config.qmdColdCollection;
+    for (const result of options.memoryResults) {
+      const parts = qmdCollectionPathParts(result.path);
+      if (parts?.collection === coldCollection) {
+        for (const namespace of options.recallNamespaces) {
+          addResultForNamespace(namespace, result);
+        }
+        continue;
+      }
+      if (path.isAbsolute(result.path)) {
+        const ns = this.namespaceFromPath(result.path);
+        if (options.recallNamespaces.includes(ns)) {
+          addResultForNamespace(ns, result);
+        } else {
+          for (const namespace of options.recallNamespaces) {
+            addResultForNamespace(namespace, result);
+          }
+        }
+        continue;
+      }
+      const ns = this.namespaceFromPath(result.path);
+      if (!options.recallNamespaces.includes(ns)) continue;
+      addResultForNamespace(ns, result);
     }
 
     const perNamespaceSeedCap = Math.max(3, options.recallResultLimit);
@@ -6032,11 +6057,14 @@ export class Orchestrator {
               storage,
               seedCandidates,
               options.deadlineAtMs,
+              [namespace],
             )
           : (
               await Promise.all(
                 seedCandidates.map((result) =>
-                  this.graphSeedPathRelativeToStorage(storage, result),
+                  this.graphSeedPathRelativeToStorage(storage, result, [
+                    namespace,
+                  ]),
                 ),
               )
             ).filter(
@@ -10751,6 +10779,7 @@ export class Orchestrator {
           query: retrievalQuery,
           memoryIds: recalledMemoryIds,
           namespace: selfNamespace,
+          recallNamespaces,
           traceId,
           plannerMode: recallMode,
           requestedMode,
@@ -17523,10 +17552,15 @@ export class Orchestrator {
   private async graphSeedPathRelativeToStorage(
     storage: StorageManager,
     result: QmdSearchResult,
+    recallNamespaces: readonly string[] = [],
   ): Promise<string | null> {
     const parts = qmdCollectionPathParts(result.path);
     if (parts) {
-      const memory = await this.readQmdResultMemory(result.path, storage);
+      const memory = await this.readQmdResultMemory(
+        result.path,
+        storage,
+        recallNamespaces,
+      );
       return memory
         ? graphPathRelativeToStorage(storage.dir, memory.path)
         : null;
@@ -17538,11 +17572,16 @@ export class Orchestrator {
     storage: StorageManager,
     results: QmdSearchResult[],
     deadlineAtMs: number,
+    recallNamespaces: readonly string[] = [],
   ): Promise<string[]> {
     const resolved: string[] = [];
     for (const result of results) {
       if (Date.now() >= deadlineAtMs) break;
-      const seedPath = await this.graphSeedPathRelativeToStorage(storage, result);
+      const seedPath = await this.graphSeedPathRelativeToStorage(
+        storage,
+        result,
+        recallNamespaces,
+      );
       if (Date.now() >= deadlineAtMs) break;
       if (seedPath) resolved.push(seedPath);
     }

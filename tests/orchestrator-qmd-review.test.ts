@@ -508,6 +508,69 @@ test("cold-tier recall resolves absolute cold paths from runtime recall namespac
   assert.equal(results[0].path, migrated.targetPath);
 });
 
+test("graph expansion resolves cold collection seeds from active recall namespaces", async () => {
+  const memoryDir = await mkdtemp(path.join(os.tmpdir(), "engram-qmd-review-cold-graph-"));
+  const runtimeDir = await mkdtemp(path.join(os.tmpdir(), "engram-qmd-review-cold-graph-runtime-"));
+  const cfg = parseConfig({
+    openaiApiKey: "sk-test",
+    memoryDir,
+    workspaceDir: path.join(memoryDir, "workspace"),
+    namespacesEnabled: true,
+    qmdColdTierEnabled: true,
+    qmdColdCollection: "openclaw-engram-cold",
+  });
+  const orchestrator = new Orchestrator(cfg) as any;
+  const StorageManagerCtor = orchestrator.storage.constructor as new (
+    dir: string,
+  ) => typeof orchestrator.storage;
+  const runtimeStorage = new StorageManagerCtor(runtimeDir);
+  const memoryId = await runtimeStorage.writeMemory(
+    "fact",
+    "runtime cold graph seed memory",
+  );
+  const memory = await runtimeStorage.getMemoryById(memoryId);
+  assert.ok(memory);
+  const migrated = await runtimeStorage.migrateMemoryToTier(memory, "cold");
+  const coldRelativePath = path
+    .relative(path.join(runtimeStorage.dir, "cold"), migrated.targetPath)
+    .split(path.sep)
+    .join("/");
+
+  const originalStorageFor = orchestrator.storageRouter.storageFor.bind(
+    orchestrator.storageRouter,
+  );
+  orchestrator.storageRouter.storageFor = async (namespace: string) =>
+    namespace === "runtime-cold"
+      ? runtimeStorage
+      : originalStorageFor(namespace);
+
+  let graphSeedPaths: string[] = [];
+  orchestrator.graphIndexFor = () => ({
+    spreadingActivation: async (seedPaths: string[]) => {
+      graphSeedPaths = seedPaths;
+      return [];
+    },
+  });
+
+  const expanded = await orchestrator.expandResultsViaGraph({
+    memoryResults: [
+      {
+        docid: memory.frontmatter.id,
+        path: `openclaw-engram-cold/${coldRelativePath}`,
+        snippet: "runtime cold graph seed memory",
+        score: 0.9,
+      },
+    ],
+    recallNamespaces: ["runtime-cold"],
+    recallResultLimit: 2,
+  });
+
+  assert.deepEqual(expanded.seedPaths, [migrated.targetPath]);
+  assert.deepEqual(graphSeedPaths, [
+    path.relative(runtimeStorage.dir, migrated.targetPath).split(path.sep).join("/"),
+  ]);
+});
+
 test("recall safety resolves absolute QMD paths from runtime recall namespaces", async () => {
   const memoryDir = await mkdtemp(path.join(os.tmpdir(), "engram-qmd-review-runtime-ns-"));
   const runtimeDir = await mkdtemp(path.join(os.tmpdir(), "engram-qmd-review-runtime-root-"));

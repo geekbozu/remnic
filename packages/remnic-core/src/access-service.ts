@@ -1486,6 +1486,7 @@ export class EngramAccessService {
       queryLen: options.query.length,
       memoryIds,
       namespace,
+      recallNamespaces: [namespace],
       traceId: options.snapshot.traceId,
       plannerMode: options.normalizedMode,
       requestedMode:
@@ -1549,6 +1550,19 @@ export class EngramAccessService {
     const namespace = snapshot.namespace ? this.resolveNamespace(snapshot.namespace) : this.orchestrator.config.defaultNamespace;
     const storage = await this.orchestrator.getStorage(namespace);
     const storageDir = storage.dir;
+    const recallNamespaces = Array.from(
+      new Set(
+        [
+          namespace,
+          ...(Array.isArray(snapshot.recallNamespaces)
+            ? snapshot.recallNamespaces.map((ns) => this.resolveNamespace(ns))
+            : []),
+          this.orchestrator.config.defaultNamespace,
+          this.orchestrator.config.sharedNamespace,
+          ...(this.orchestrator.config.namespacePolicies ?? []).map((p) => p.name),
+        ].filter((ns): ns is string => typeof ns === "string" && ns.length > 0),
+      ),
+    );
     const results: EngramAccessMemorySummary[] = [];
     const seen = new Set<string>();
     const collectionNamespaceFromPrefix = (collectionPrefix: string): string | null => {
@@ -1573,20 +1587,39 @@ export class EngramAccessService {
       const parts = qmdCollectionPathParts(memoryPath);
       const coldCollection = this.orchestrator.config.qmdColdCollection;
       if (parts && parts.collection === coldCollection) {
-        try {
-          const coldRoot = nodePath.join(storageDir, "cold");
-          for (const candidate of qmdResultPathCandidates(
-            coldRoot,
-            parts.relativePath,
-          )) {
-            const memory = await storage.readMemoryByPath(candidate);
-            if (memory) return { memory, baseDir: storageDir };
+        const storages: Array<{ storage: StorageManager; dir: string }> = [];
+        const seenStorageDirs = new Set<string>();
+        const addStorage = (candidateStorage: StorageManager): void => {
+          const candidateDir = nodePath.resolve(candidateStorage.dir);
+          if (seenStorageDirs.has(candidateDir)) return;
+          seenStorageDirs.add(candidateDir);
+          storages.push({ storage: candidateStorage, dir: candidateDir });
+        };
+        addStorage(storage);
+        for (const recallNamespace of recallNamespaces) {
+          try {
+            addStorage(await this.orchestrator.getStorage(recallNamespace));
+          } catch {
+            continue;
           }
-          return null;
-        } catch (err) {
-          if (err instanceof SecureStoreLockedError) throw err;
-          return null;
         }
+        for (const candidateStorage of storages) {
+          try {
+            const coldRoot = nodePath.join(candidateStorage.dir, "cold");
+            for (const candidatePath of qmdResultPathCandidates(
+              coldRoot,
+              parts.relativePath,
+            )) {
+              const memory =
+                await candidateStorage.storage.readMemoryByPath(candidatePath);
+              if (memory) return { memory, baseDir: candidateStorage.dir };
+            }
+          } catch (err) {
+            if (err instanceof SecureStoreLockedError) throw err;
+            continue;
+          }
+        }
+        return null;
       }
 
       const collectionNamespace = parts
@@ -1615,6 +1648,7 @@ export class EngramAccessService {
         const ownerStorage = await this.storageForAbsoluteRecallPath(
           memoryPath,
           namespace,
+          recallNamespaces,
         );
         if (!ownerStorage) return null;
         for (const candidate of qmdResultPathCandidates(
@@ -1687,12 +1721,16 @@ export class EngramAccessService {
   private async storageForAbsoluteRecallPath(
     memoryPath: string,
     primaryNamespace: string,
+    recallNamespaces: readonly string[] = [],
   ): Promise<{ storage: StorageManager; dir: string } | null> {
     const resolvedPath = nodePath.resolve(memoryPath);
     const memoryRoot = nodePath.resolve(this.orchestrator.config.memoryDir);
     const namespacesRoot = nodePath.join(memoryRoot, "namespaces");
     const configuredNamespaces = new Set<string>();
     configuredNamespaces.add(primaryNamespace);
+    for (const namespace of recallNamespaces) {
+      configuredNamespaces.add(namespace);
+    }
     configuredNamespaces.add(this.orchestrator.config.defaultNamespace);
     configuredNamespaces.add(this.orchestrator.config.sharedNamespace);
     if (isPathInsideStorageRoot(namespacesRoot, resolvedPath)) {
