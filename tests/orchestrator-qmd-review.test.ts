@@ -353,6 +353,55 @@ test("cold-tier recall forwards explain traces even when intent hints are disabl
   assert.deepEqual(capturedOptions, { explain: true });
 });
 
+test("cold-tier recall reads encrypted cold collection paths through primary storage", async () => {
+  const memoryDir = await mkdtemp(path.join(os.tmpdir(), "engram-qmd-review-cold-secure-"));
+  const cfg = parseConfig({
+    openaiApiKey: "sk-test",
+    memoryDir,
+    workspaceDir: path.join(memoryDir, "workspace"),
+    qmdColdTierEnabled: true,
+    qmdColdCollection: "openclaw-engram-cold",
+    secureStoreEnabled: true,
+  });
+  const orchestrator = new Orchestrator(cfg) as any;
+  orchestrator.storage.setSecureStoreKey(Buffer.alloc(32, 9), true);
+  const memoryId = await orchestrator.storage.writeMemory(
+    "fact",
+    "encrypted cold collection memory",
+  );
+  const memory = await orchestrator.storage.getMemoryById(memoryId);
+  assert.ok(memory);
+  const migrated = await orchestrator.storage.migrateMemoryToTier(memory, "cold");
+  const coldRelativePath = path
+    .relative(path.join(orchestrator.storage.dir, "cold"), migrated.targetPath)
+    .split(path.sep)
+    .join("/");
+
+  orchestrator.qmd = {
+    isAvailable: () => true,
+  };
+  orchestrator.fetchQmdMemoryResultsWithArtifactTopUp = async () => [
+    {
+      docid: memory.frontmatter.id,
+      path: `openclaw-engram-cold/${coldRelativePath}`,
+      snippet: "encrypted cold collection memory",
+      score: 0.9,
+    },
+  ];
+
+  const results = await orchestrator.applyColdFallbackPipeline({
+    prompt: "review encrypted archive",
+    recallNamespaces: ["default"],
+    recallResultLimit: 2,
+    recallMode: "full",
+    queryAwarePrefilter: EMPTY_PREFILTER,
+  });
+
+  assert.equal(results.length, 1);
+  assert.equal(results[0].docid, memory.frontmatter.id);
+  assert.equal(results[0].path, `openclaw-engram-cold/${coldRelativePath}`);
+});
+
 test("QMD recall snapshot helpers read persisted snapshots and memory_qmd_debug is registered", async () => {
   const memoryDir = await mkdtemp(path.join(os.tmpdir(), "engram-qmd-debug-"));
   const cfg = parseConfig({

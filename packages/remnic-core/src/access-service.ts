@@ -1571,6 +1571,24 @@ export class EngramAccessService {
       memoryPath: string,
     ): Promise<{ memory: MemoryFile; baseDir: string } | null> => {
       const parts = qmdCollectionPathParts(memoryPath);
+      const coldCollection = this.orchestrator.config.qmdColdCollection;
+      if (parts && parts.collection === coldCollection) {
+        try {
+          const coldRoot = nodePath.join(storageDir, "cold");
+          for (const candidate of qmdResultPathCandidates(
+            coldRoot,
+            parts.relativePath,
+          )) {
+            const memory = await storage.readMemoryByPath(candidate);
+            if (memory) return { memory, baseDir: storageDir };
+          }
+          return null;
+        } catch (err) {
+          if (err instanceof SecureStoreLockedError) throw err;
+          return null;
+        }
+      }
+
       const collectionNamespace = parts
         ? collectionNamespaceFromPrefix(parts.collection)
         : null;

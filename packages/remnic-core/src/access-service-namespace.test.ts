@@ -340,6 +340,83 @@ test("last recall serialization does not fall back after namespace collection mi
   );
 });
 
+test("last recall serialization resolves cold collection paths through snapshot storage", async () => {
+  const service = Object.create(EngramAccessService.prototype) as EngramAccessService;
+  const memoryRoot = await mkdtemp(path.join(os.tmpdir(), "remnic-access-qmd-cold-"));
+  const coldMemoryPath = path.join(
+    memoryRoot,
+    "cold",
+    "facts",
+    "2026-06-16",
+    "fact-001.md",
+  );
+  const coldMemory = {
+    path: coldMemoryPath,
+    frontmatter: {
+      id: "fact-001",
+      created: "2026-06-16T12:00:00.000Z",
+      updated: "2026-06-16T12:00:00.000Z",
+      category: "fact",
+      status: "active",
+    },
+    content: "Cold namespace recall content.",
+  };
+  const readCalls: string[] = [];
+  const storage = {
+    dir: memoryRoot,
+    async readMemoryByPath(filePath: string) {
+      readCalls.push(filePath);
+      return filePath === coldMemoryPath ? coldMemory : null;
+    },
+    async getMemoryById() {
+      return null;
+    },
+  } as unknown as StorageManager;
+
+  (service as unknown as {
+    orchestrator: {
+      config: PluginConfig;
+      getStorage(namespace: string): Promise<StorageManager>;
+    };
+  }).orchestrator = {
+    config: {
+      ...makeConfig(),
+      qmdColdCollection: "test-memory-cold",
+    },
+    async getStorage() {
+      return storage;
+    },
+  };
+
+  const result = await (service as unknown as {
+    serializeRecallResults(
+      snapshot: unknown,
+      disclosure: "summary",
+    ): Promise<Array<{ id: string; path: string; preview: string; status: string }>>;
+  }).serializeRecallResults(
+    {
+      sessionKey: "session-1",
+      recordedAt: "2026-06-16T12:00:00.000Z",
+      queryHash: "hash",
+      queryLen: 4,
+      memoryIds: [],
+      namespace: "default",
+      resultPaths: ["test-memory-cold/facts/2026-06-16/fact-001.md"],
+    },
+    "summary",
+  );
+
+  assert.equal(result.length, 1);
+  assert.equal(result[0].id, "fact-001");
+  assert.equal(result[0].path, coldMemoryPath);
+  assert.ok(result[0].preview.includes("Cold namespace recall content"));
+  assert.ok(readCalls.includes(coldMemoryPath));
+  assert.ok(
+    !readCalls.includes(path.join(memoryRoot, "test-memory-cold", "facts", "2026-06-16", "fact-001.md")),
+    "expected cold collection path to resolve under cold/ rather than a collection-named subdirectory",
+  );
+});
+
 test("last recall serialization propagates locked namespace collection errors", async () => {
   const service = Object.create(EngramAccessService.prototype) as EngramAccessService;
   const memoryRoot = await mkdtemp(path.join(os.tmpdir(), "remnic-access-qmd-lock-"));

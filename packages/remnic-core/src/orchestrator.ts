@@ -15713,14 +15713,17 @@ export class Orchestrator {
         ? (fallbackStorage as { dir: string }).dir
         : null;
     const coldCollection = this.config.qmdColdCollection;
-    if (parts && parts.collection === coldCollection && fallbackStorageDir) {
+    if (parts && parts.collection === coldCollection) {
+      if (!fallbackStorageDir) {
+        return await fallbackStorage.readMemoryByPath(resultPath);
+      }
       try {
-        const coldStorage = new StorageManager(path.join(fallbackStorageDir, "cold"));
+        const coldRoot = path.join(fallbackStorageDir, "cold");
         for (const candidate of qmdResultPathCandidates(
-          coldStorage.dir,
+          coldRoot,
           parts.relativePath,
         )) {
-          const memory = await coldStorage.readMemoryByPath(candidate);
+          const memory = await fallbackStorage.readMemoryByPath(candidate);
           if (memory) return memory;
         }
         return null;
