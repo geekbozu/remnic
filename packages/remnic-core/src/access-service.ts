@@ -1585,7 +1585,8 @@ export class EngramAccessService {
       memoryPath: string,
     ): Promise<{ memory: MemoryFile; baseDir: string } | null> => {
       const parts = qmdCollectionPathParts(memoryPath);
-      const coldCollection = this.orchestrator.config.qmdColdCollection;
+      const coldCollection =
+        this.orchestrator.config.qmdColdCollection ?? "openclaw-engram-cold";
       if (parts && parts.collection === coldCollection) {
         const storages: Array<{ storage: StorageManager; dir: string }> = [];
         const seenStorageDirs = new Set<string>();

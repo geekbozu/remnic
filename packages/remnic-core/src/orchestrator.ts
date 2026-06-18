@@ -6011,7 +6011,7 @@ export class Orchestrator {
         byNamespace.set(namespace, [result]);
       }
     };
-    const coldCollection = this.config.qmdColdCollection;
+    const coldCollection = this.config.qmdColdCollection ?? "openclaw-engram-cold";
     for (const result of options.memoryResults) {
       const parts = qmdCollectionPathParts(result.path);
       if (parts?.collection === coldCollection) {
@@ -15744,7 +15744,7 @@ export class Orchestrator {
         ? (storage as { dir: string }).dir
         : null;
     const fallbackStorageDir = storageDirFor(fallbackStorage);
-    const coldCollection = this.config.qmdColdCollection;
+    const coldCollection = this.config.qmdColdCollection ?? "openclaw-engram-cold";
     if (parts && parts.collection === coldCollection) {
       const storages: StorageManager[] = [];
       const seenStorageDirs = new Set<string>();
@@ -16545,8 +16545,8 @@ export class Orchestrator {
 
     let results = longTerm;
     if (this.config.namespacesEnabled) {
-      const coldRoots: string[] = [];
-      const seenColdRoots = new Set<string>();
+      const recallRoots: string[] = [];
+      const seenRecallRoots = new Set<string>();
       for (const namespace of options.recallNamespaces) {
         try {
           const storage = await this.storageRouter.storageFor(namespace);
@@ -16556,10 +16556,10 @@ export class Orchestrator {
               ? (storage as { dir: string }).dir
               : null;
           if (!storageDir) continue;
-          const coldRoot = path.resolve(storageDir, "cold");
-          if (seenColdRoots.has(coldRoot)) continue;
-          seenColdRoots.add(coldRoot);
-          coldRoots.push(coldRoot);
+          const recallRoot = path.resolve(storageDir);
+          if (seenRecallRoots.has(recallRoot)) continue;
+          seenRecallRoots.add(recallRoot);
+          recallRoots.push(recallRoot);
         } catch (err) {
           log.debug("cold-tier recall namespace root lookup skipped", {
             namespace,
@@ -16573,8 +16573,8 @@ export class Orchestrator {
         if (path.isAbsolute(r.path)) {
           const resolvedPath = path.resolve(r.path);
           if (
-            coldRoots.some((coldRoot) =>
-              isPathInsideStorageRoot(coldRoot, resolvedPath),
+            recallRoots.some((recallRoot) =>
+              isPathInsideStorageRoot(recallRoot, resolvedPath),
             )
           ) {
             return true;

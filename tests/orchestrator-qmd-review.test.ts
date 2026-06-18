@@ -402,6 +402,52 @@ test("cold-tier recall reads encrypted cold collection paths through primary sto
   assert.equal(results[0].path, `openclaw-engram-cold/${coldRelativePath}`);
 });
 
+test("cold-tier recall resolves the default cold collection when config omits it", async () => {
+  const memoryDir = await mkdtemp(path.join(os.tmpdir(), "engram-qmd-review-cold-default-"));
+  const cfg = parseConfig({
+    openaiApiKey: "sk-test",
+    memoryDir,
+    workspaceDir: path.join(memoryDir, "workspace"),
+    qmdColdTierEnabled: true,
+  });
+  const orchestrator = new Orchestrator(cfg) as any;
+  orchestrator.config.qmdColdCollection = undefined;
+  const memoryId = await orchestrator.storage.writeMemory(
+    "fact",
+    "default cold collection memory",
+  );
+  const memory = await orchestrator.storage.getMemoryById(memoryId);
+  assert.ok(memory);
+  const migrated = await orchestrator.storage.migrateMemoryToTier(memory, "cold");
+  const coldRelativePath = path
+    .relative(path.join(orchestrator.storage.dir, "cold"), migrated.targetPath)
+    .split(path.sep)
+    .join("/");
+
+  orchestrator.qmd = {
+    isAvailable: () => true,
+  };
+  orchestrator.fetchQmdMemoryResultsWithArtifactTopUp = async () => [
+    {
+      docid: memory.frontmatter.id,
+      path: `openclaw-engram-cold/${coldRelativePath}`,
+      snippet: "default cold collection memory",
+      score: 0.9,
+    },
+  ];
+
+  const results = await orchestrator.applyColdFallbackPipeline({
+    prompt: "review default cold collection",
+    recallNamespaces: ["default"],
+    recallResultLimit: 2,
+    recallMode: "full",
+    queryAwarePrefilter: EMPTY_PREFILTER,
+  });
+
+  assert.equal(results.length, 1);
+  assert.equal(results[0].docid, memory.frontmatter.id);
+});
+
 test("cold-tier recall resolves collection-prefixed paths from active recall namespaces", async () => {
   const memoryDir = await mkdtemp(path.join(os.tmpdir(), "engram-qmd-review-cold-ns-"));
   const cfg = parseConfig({
@@ -506,6 +552,61 @@ test("cold-tier recall resolves absolute cold paths from runtime recall namespac
   assert.equal(results.length, 1);
   assert.equal(results[0].docid, memory.frontmatter.id);
   assert.equal(results[0].path, migrated.targetPath);
+});
+
+test("cold fallback keeps absolute fallback hits under active runtime recall roots", async () => {
+  const memoryDir = await mkdtemp(path.join(os.tmpdir(), "engram-qmd-review-archive-abs-ns-"));
+  const runtimeDir = await mkdtemp(path.join(os.tmpdir(), "engram-qmd-review-archive-runtime-"));
+  const cfg = parseConfig({
+    openaiApiKey: "sk-test",
+    memoryDir,
+    workspaceDir: path.join(memoryDir, "workspace"),
+    namespacesEnabled: true,
+    qmdColdTierEnabled: false,
+  });
+  const orchestrator = new Orchestrator(cfg) as any;
+  const StorageManagerCtor = orchestrator.storage.constructor as new (
+    dir: string,
+  ) => typeof orchestrator.storage;
+  const runtimeStorage = new StorageManagerCtor(runtimeDir);
+  const memoryId = await runtimeStorage.writeMemory(
+    "fact",
+    "runtime archive fallback absolute memory",
+  );
+  const memory = await runtimeStorage.getMemoryById(memoryId);
+  assert.ok(memory);
+
+  const originalStorageFor = orchestrator.storageRouter.storageFor.bind(
+    orchestrator.storageRouter,
+  );
+  orchestrator.storageRouter.storageFor = async (namespace: string) =>
+    namespace === "runtime-archive"
+      ? runtimeStorage
+      : originalStorageFor(namespace);
+
+  orchestrator.qmd = {
+    isAvailable: () => false,
+  };
+  orchestrator.searchLongTermArchiveFallback = async () => [
+    {
+      docid: memory.frontmatter.id,
+      path: memory.path,
+      snippet: "runtime archive fallback absolute memory",
+      score: 0.9,
+    },
+  ];
+
+  const results = await orchestrator.applyColdFallbackPipeline({
+    prompt: "review runtime archive fallback",
+    recallNamespaces: ["runtime-archive"],
+    recallResultLimit: 2,
+    recallMode: "full",
+    queryAwarePrefilter: EMPTY_PREFILTER,
+  });
+
+  assert.equal(results.length, 1);
+  assert.equal(results[0].docid, memory.frontmatter.id);
+  assert.equal(results[0].path, memory.path);
 });
 
 test("graph expansion resolves cold collection seeds from active recall namespaces", async () => {
