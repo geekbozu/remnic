@@ -5,7 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import { gzipSync } from "node:zlib";
 
-import { EngramAccessHttpServer } from "./access-http.js";
+import { EngramAccessHttpServer, type RemnicAdminControls, type RemnicAdminDashboardStatus } from "./access-http.js";
 import { EngramAccessInputError, type EngramAccessService } from "./access-service.js";
 import { parseConfig } from "./config.js";
 import { readPair, writePair } from "./contradiction/contradiction-review.js";
@@ -128,6 +128,77 @@ test("HTTP admin console assets are public but API routes require bearer authent
     assert.equal(api.status, 401);
     assert.equal(body.code, "unauthorized");
     assert.equal(api.headers.get("www-authenticate"), "Bearer");
+  } finally {
+    await server.stop();
+  }
+});
+
+test("HTTP admin dashboard endpoints require bearer authentication and apply config patches", async () => {
+  const service = {} as EngramAccessService;
+  const patches: unknown[] = [];
+  const dashboard: RemnicAdminDashboardStatus = {
+    config: {
+      path: "/tmp/remnic/config.json",
+      exists: true,
+      writable: true,
+      restartRequired: false,
+      values: {
+        modelSource: "plugin",
+        model: "gpt-4.1-mini",
+      },
+    },
+    harnesses: [],
+    models: [],
+    features: [],
+  };
+  const adminControls: RemnicAdminControls = {
+    status: async () => dashboard,
+    update: async (patch) => {
+      patches.push(patch);
+      return {
+        ...dashboard,
+        config: {
+          ...dashboard.config,
+          restartRequired: true,
+          values: {
+            ...dashboard.config.values,
+            modelSource: "gateway",
+            gatewayAgentId: "sage-router",
+          },
+        },
+      };
+    },
+  };
+  const server = new EngramAccessHttpServer({
+    service,
+    port: 0,
+    authToken: "test-token",
+    adminControls,
+  });
+
+  const status = await server.start();
+  try {
+    const unauthorized = await fetch(`http://127.0.0.1:${status.port}/engram/v1/admin/dashboard`);
+    assert.equal(unauthorized.status, 401);
+
+    const dashboardResponse = await fetch(`http://127.0.0.1:${status.port}/engram/v1/admin/dashboard`, {
+      headers: { authorization: "Bearer test-token" },
+    });
+    assert.equal(dashboardResponse.status, 200);
+    assert.deepEqual(await dashboardResponse.json(), dashboard);
+
+    const patchResponse = await fetch(`http://127.0.0.1:${status.port}/remnic/v1/admin/config`, {
+      method: "PATCH",
+      headers: {
+        authorization: "Bearer test-token",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ modelSource: "gateway", gatewayAgentId: "sage-router" }),
+    });
+    assert.equal(patchResponse.status, 200);
+    const body = await patchResponse.json() as RemnicAdminDashboardStatus;
+    assert.equal(body.config.restartRequired, true);
+    assert.deepEqual(patches, [{ modelSource: "gateway", gatewayAgentId: "sage-router" }]);
   } finally {
     await server.stop();
   }

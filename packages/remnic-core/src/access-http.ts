@@ -52,6 +52,8 @@ export interface EngramAccessHttpServerOptions {
   citationsAutoDetect?: boolean;
   /** Advertise legacy engram.* tool aliases on tools/list (issue #1427). Default true. */
   emitLegacyTools?: boolean;
+  /** Optional authenticated admin dashboard/config controls supplied by the host server. */
+  adminControls?: RemnicAdminControls;
 }
 
 export interface EngramAccessHttpServerStatus {
@@ -59,6 +61,55 @@ export interface EngramAccessHttpServerStatus {
   host: string;
   port: number;
   maxBodyBytes: number;
+}
+
+export interface RemnicAdminHarnessStatus {
+  id: string;
+  label: string;
+  detected: boolean;
+  enabled: boolean;
+  source?: string;
+  detail?: string;
+}
+
+export interface RemnicAdminModelOption {
+  id: string;
+  label: string;
+  provider: string;
+  detected: boolean;
+  enabled: boolean;
+  default?: boolean;
+  source?: string;
+}
+
+export interface RemnicAdminFeatureStatus {
+  key: string;
+  label: string;
+  enabled: boolean;
+  writable: boolean;
+  restartRequired?: boolean;
+}
+
+export interface RemnicAdminConfigStatus {
+  path: string;
+  exists: boolean;
+  writable: boolean;
+  restartRequired: boolean;
+  values: Record<string, string | number | boolean | null>;
+}
+
+export interface RemnicAdminDashboardStatus {
+  config: RemnicAdminConfigStatus;
+  harnesses: RemnicAdminHarnessStatus[];
+  models: RemnicAdminModelOption[];
+  features: RemnicAdminFeatureStatus[];
+}
+
+export type RemnicAdminConfigPatch = Record<string, unknown>;
+
+export interface RemnicAdminControls {
+  status: () => Promise<RemnicAdminDashboardStatus>;
+  update?: (patch: RemnicAdminConfigPatch) => Promise<RemnicAdminDashboardStatus>;
 }
 
 function resolveDefaultAdminConsolePublicDir(): string {
@@ -210,6 +261,7 @@ export class EngramAccessHttpServer {
   private readonly maxBodyBytes: number;
   private readonly adminConsoleEnabled: boolean;
   private readonly adminConsolePublicDir: string;
+  private readonly adminControls?: RemnicAdminControls;
   private readonly trustPrincipalHeader: boolean;
   private readonly adapterRegistry: AdapterRegistry | null;
   private readonly writeRequestTimestamps: number[] = [];
@@ -242,6 +294,7 @@ export class EngramAccessHttpServer {
       : 131072;
     this.adminConsoleEnabled = options.adminConsoleEnabled !== false;
     this.adminConsolePublicDir = options.adminConsolePublicDir ?? defaultAdminConsolePublicDir;
+    this.adminControls = options.adminControls;
     this.trustPrincipalHeader = options.trustPrincipalHeader === true;
     this.adapterRegistry = options.enableAdapters !== false
       ? (options.adapterRegistry ?? new AdapterRegistry())
@@ -489,6 +542,38 @@ export class EngramAccessHttpServer {
         registered: this.adapterRegistry?.list() ?? [],
         resolved: identity,
       });
+      return;
+    }
+
+    if (
+      req.method === "GET" &&
+      (pathname === "/engram/v1/admin/dashboard" || pathname === "/remnic/v1/admin/dashboard")
+    ) {
+      if (!this.adminControls) {
+        this.respondJson(res, 404, { error: "admin_controls_unavailable", code: "admin_controls_unavailable" });
+        return;
+      }
+      this.respondJson(res, 200, await this.adminControls.status());
+      return;
+    }
+
+    if (
+      req.method === "PATCH" &&
+      (pathname === "/engram/v1/admin/config" || pathname === "/remnic/v1/admin/config")
+    ) {
+      if (!this.adminControls?.update) {
+        this.respondJson(res, 404, { error: "admin_controls_unavailable", code: "admin_controls_unavailable" });
+        return;
+      }
+      try {
+        this.respondJson(res, 200, await this.adminControls.update(await this.readJsonBody(req)));
+      } catch (error) {
+        throw new HttpError(
+          400,
+          error instanceof Error ? error.message : "invalid_admin_config_patch",
+          "invalid_admin_config_patch",
+        );
+      }
       return;
     }
 

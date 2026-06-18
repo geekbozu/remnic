@@ -30,6 +30,19 @@ npx --package @remnic/server remnic-server --help
 npx --package @remnic/server remnic-server --port 4318
 ```
 
+Run the container image:
+
+```bash
+docker run --rm \
+  -p 4318:4318 \
+  -v remnic-data:/data \
+  -e REMNIC_AUTH_TOKEN=change-me \
+  ghcr.io/joshuaswarren/remnic:latest
+```
+
+The image stores memory and runtime configuration under `/data`. The admin
+console is enabled by default and is available at `/engram/ui/`.
+
 The package also ships the legacy `engram-server` binary for compatibility.
 The bin wrappers are source-controlled so package managers can link them during
 workspace installs; release builds verify that both targets have Node shebangs

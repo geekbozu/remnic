@@ -26,6 +26,9 @@ const browserState = {
   offset: 0,
   total: 0,
 };
+const runtimeState = {
+  dashboard: null,
+};
 const trustZoneState = {
   limit: 12,
   offset: 0,
@@ -85,6 +88,180 @@ function createItem() {
   const article = document.createElement("article");
   article.className = "item";
   return article;
+}
+
+function setInputValue(id, value) {
+  const input = $(id);
+  if (!input) return;
+  input.value = value == null ? "" : String(value);
+}
+
+function renderCompactStatusList(container, items, emptyMessage) {
+  clearChildren(container);
+  if (!container) return;
+  if (!Array.isArray(items) || items.length === 0) {
+    renderEmptyState(container, emptyMessage);
+    return;
+  }
+  items.forEach((item) => {
+    const row = document.createElement("div");
+    row.className = "compact-item";
+    const text = document.createElement("div");
+    const title = document.createElement("strong");
+    title.textContent = item.label || item.id || "Unknown";
+    text.appendChild(title);
+    const detail = document.createElement("div");
+    detail.className = item.enabled ? "status ok" : "status";
+    const parts = [];
+    if (item.provider) parts.push(item.provider);
+    parts.push(item.enabled ? "enabled" : "disabled");
+    parts.push(item.detected ? "detected" : "not detected");
+    if (item.source) parts.push(item.source);
+    detail.textContent = parts.join(" / ");
+    text.appendChild(detail);
+    row.appendChild(text);
+
+    const meta = document.createElement("div");
+    meta.className = "pill-row";
+    if (item.default) appendPill(meta, "default");
+    appendPill(meta, item.id);
+    row.appendChild(meta);
+    container.appendChild(row);
+  });
+}
+
+function selectDefaultModelValue(models, values) {
+  const source = values?.modelSource;
+  const candidates = Array.isArray(models) ? models : [];
+  const defaultModel = candidates.find((model) => model.default);
+  if (defaultModel) return `${defaultModel.provider}\t${defaultModel.id}`;
+  if (source === "gateway" && values?.gatewayAgentId) return `gateway\t${values.gatewayAgentId}`;
+  if (values?.localLlmEnabled && values?.localLlmModel) return `local\t${values.localLlmModel}`;
+  if (values?.model) return `openai\t${values.model}`;
+  return "";
+}
+
+function renderDefaultModelSelect(models, values) {
+  const select = $("defaultModelSelect");
+  if (!select) return;
+  clearChildren(select);
+  const allowedProviders = new Set(["openai", "gateway", "local", "ollama"]);
+  const candidates = (Array.isArray(models) ? models : [])
+    .filter((model) => model?.id && allowedProviders.has(model.provider));
+  if (candidates.length === 0 && values?.model) {
+    candidates.push({
+      id: String(values.model),
+      label: String(values.model),
+      provider: "openai",
+      detected: true,
+      enabled: true,
+      default: true,
+    });
+  }
+  candidates.forEach((model) => {
+    const option = document.createElement("option");
+    option.value = `${model.provider}\t${model.id}`;
+    option.textContent = `${model.label || model.id} (${model.provider})`;
+    select.appendChild(option);
+  });
+  const current = selectDefaultModelValue(candidates, values);
+  if (current) select.value = current;
+}
+
+function renderFeatureToggles(features) {
+  const list = $("featureToggleList");
+  clearChildren(list);
+  if (!list) return;
+  if (!Array.isArray(features) || features.length === 0) {
+    renderEmptyState(list, "No feature controls returned.");
+    return;
+  }
+  features.forEach((feature) => {
+    const row = document.createElement("div");
+    row.className = "toggle-row";
+    const label = document.createElement("label");
+    const span = document.createElement("span");
+    span.textContent = feature.label || feature.key;
+    label.appendChild(span);
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.checked = feature.enabled === true;
+    input.disabled = feature.writable === false;
+    input.dataset.configKey = feature.key;
+    label.appendChild(input);
+    row.appendChild(label);
+    list.appendChild(row);
+  });
+}
+
+function renderRuntimeDashboard(payload) {
+  runtimeState.dashboard = payload;
+  const values = payload?.config?.values || {};
+  setInputValue("runtimeConfigPath", payload?.config?.path || "");
+  setInputValue("localLlmUrlInput", values.localLlmUrl);
+  setInputValue("localLlmModelInput", values.localLlmModel);
+  setInputValue("gatewayAgentIdInput", values.gatewayAgentId);
+  const sourceSelect = $("modelSourceSelect");
+  if (sourceSelect && values.modelSource) sourceSelect.value = String(values.modelSource);
+  renderDefaultModelSelect(payload?.models, values);
+  renderCompactStatusList($("harnessList"), payload?.harnesses, "No harnesses detected.");
+  renderCompactStatusList($("modelList"), payload?.models, "No models detected.");
+  renderFeatureToggles(payload?.features);
+  const state = payload?.config?.restartRequired ? "Saved changes require restart." : "Runtime loaded.";
+  setStatus("runtimeStatus", `${state} ${payload?.config?.writable ? "Config writable." : "Config read-only."}`, payload?.config?.writable ? "ok" : "error");
+}
+
+async function loadAdminDashboard() {
+  setStatus("runtimeStatus", "Loading runtime...", "default");
+  const payload = await fetchJson("/engram/v1/admin/dashboard");
+  renderRuntimeDashboard(payload);
+}
+
+function readOptionalInput(id) {
+  const value = $(id)?.value?.trim() || "";
+  return value.length > 0 ? value : null;
+}
+
+function collectRuntimePatch() {
+  const patch = {};
+  const source = $("modelSourceSelect")?.value;
+  if (source) patch.modelSource = source;
+  patch.localLlmUrl = readOptionalInput("localLlmUrlInput");
+  patch.localLlmModel = readOptionalInput("localLlmModelInput");
+  patch.gatewayAgentId = readOptionalInput("gatewayAgentIdInput");
+
+  const selectedModel = $("defaultModelSelect")?.value || "";
+  const [provider, id] = selectedModel.split("\t");
+  if (provider && id) {
+    if (provider === "gateway") {
+      patch.modelSource = "gateway";
+      patch.gatewayAgentId = id;
+    } else if (provider === "local" || provider === "ollama") {
+      patch.localLlmEnabled = true;
+      patch.localLlmModel = id;
+    } else if (provider === "openai") {
+      patch.modelSource = "plugin";
+      patch.model = id;
+    }
+  }
+
+  document.querySelectorAll("#featureToggleList input[data-config-key]").forEach((input) => {
+    patch[input.dataset.configKey] = input.checked === true;
+  });
+  return patch;
+}
+
+async function saveRuntimeConfig() {
+  setStatus("runtimeStatus", "Saving runtime...", "default");
+  try {
+    const payload = await fetchJson("/engram/v1/admin/config", {
+      method: "PATCH",
+      body: JSON.stringify(collectRuntimePatch()),
+    });
+    renderRuntimeDashboard(payload);
+  } catch (error) {
+    setStatus("runtimeStatus", error.message || String(error), "error");
+  }
 }
 
 async function fetchJson(url, options = {}) {
@@ -1882,6 +2059,7 @@ async function connectAndBootstrap() {
       loadQuality(),
       loadMaintenance(),
       loadMemoryGraph(),
+      loadAdminDashboard(),
     ]);
   } catch (error) {
     setStatus("authStatus", error.message || String(error), "error");
@@ -1951,6 +2129,8 @@ function bootstrap() {
   $("graphSearchQuery")?.addEventListener("keydown", (e) => {
     if (e.key === "Enter") void runGraphSearch();
   });
+  $("refreshRuntimeButton")?.addEventListener("click", () => void loadAdminDashboard());
+  $("saveRuntimeConfigButton")?.addEventListener("click", () => void saveRuntimeConfig());
 
   if (remembered) {
     void connectAndBootstrap();

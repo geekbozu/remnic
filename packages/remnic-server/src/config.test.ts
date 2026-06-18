@@ -129,6 +129,11 @@ test("server config parser validates and coerces supported fields", () => {
   assert.equal(parsed.adminConsolePublicDir, "~/remnic-console");
 });
 
+test("server config parser enables the admin console by default", () => {
+  assert.equal(parseServerConfig({}).adminConsoleEnabled, true);
+  assert.equal(parseServerConfig({ adminConsoleEnabled: false }).adminConsoleEnabled, false);
+});
+
 test("server config parser rejects invalid field types", () => {
   assert.throws(
     () => parseServerConfig({ host: 123 as unknown as string }),

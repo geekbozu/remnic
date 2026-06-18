@@ -48,7 +48,7 @@ export default defineConfig({
   outDir: "dist",
   clean: true,
   sourcemap: true,
-  dts: true,
+  dts: process.env.REMNIC_DOCKER_RUNTIME_BUILD === "1" ? false : true,
   external: [
     "openclaw",
     "@node-rs/argon2",
