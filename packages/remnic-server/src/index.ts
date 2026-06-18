@@ -455,7 +455,6 @@ async function detectOllamaModels(baseUrl: string | undefined): Promise<RemnicAd
 function dashboardHarnesses(config: PluginConfig) {
   const openclawDetected = hasEnv("OPENCLAW_HOME") || hasEnv("OPENCLAW_WORKSPACE") || fileExists("~/.openclaw");
   const codexDetected = hasEnv("CODEX_HOME") || fileExists("~/.codex/auth.json") || fileExists("~/.codex");
-  const ollamaDetected = hasEnv("OLLAMA_HOST") || /(?:ollama|11434)/i.test(config.localLlmUrl);
   return [
     {
       id: "remnic-http",
@@ -482,6 +481,45 @@ function dashboardHarnesses(config: PluginConfig) {
       detail: "Citation-aware adapter",
     },
     {
+      id: "qmd",
+      label: "QMD Search",
+      detected: Boolean(config.qmdPath) || config.qmdEnabled,
+      enabled: config.qmdEnabled,
+      source: config.qmdPath ? "qmdPath" : "config",
+      detail: config.qmdSearchStrategy,
+    },
+  ];
+}
+
+function dashboardProviders(config: PluginConfig) {
+  const localLlmUrl = config.localLlmUrl || "";
+  const gatewayIds = [config.gatewayAgentId, config.fastGatewayAgentId].filter(Boolean).join(" ");
+  const openaiBaseUrl = process.env.OPENAI_BASE_URL || "";
+  const sageRouterDetected =
+    hasEnv("SAGE_ROUTER_URL") ||
+    hasEnv("SAGE_ROUTER_HOST") ||
+    /sage[-_ ]?router/i.test(`${gatewayIds} ${openaiBaseUrl}`);
+  const ollamaDetected = hasEnv("OLLAMA_HOST") || /(?:ollama|11434)/i.test(localLlmUrl);
+  const localDetected = Boolean(localLlmUrl.trim());
+
+  return [
+    {
+      id: "openai",
+      label: "OpenAI",
+      detected: !isOpenaiApiKeyDisabled(config.openaiApiKey),
+      enabled: config.modelSource === "plugin" && !isOpenaiApiKeyDisabled(config.openaiApiKey),
+      source: !isOpenaiApiKeyDisabled(config.openaiApiKey) ? "config/env" : "disabled",
+      detail: config.model,
+    },
+    {
+      id: "sage-router",
+      label: "Sage Router",
+      detected: sageRouterDetected,
+      enabled: config.modelSource === "gateway" && sageRouterDetected,
+      source: sageRouterDetected ? "gateway/env" : "not detected",
+      detail: config.gatewayAgentId || config.fastGatewayAgentId || openaiBaseUrl || "OpenAI-compatible provider router",
+    },
+    {
       id: "ollama",
       label: "Ollama",
       detected: ollamaDetected,
@@ -490,12 +528,12 @@ function dashboardHarnesses(config: PluginConfig) {
       detail: "Local or cloud-compatible Ollama endpoint",
     },
     {
-      id: "qmd",
-      label: "QMD Search",
-      detected: Boolean(config.qmdPath) || config.qmdEnabled,
-      enabled: config.qmdEnabled,
-      source: config.qmdPath ? "qmdPath" : "config",
-      detail: config.qmdSearchStrategy,
+      id: "local-openai-compatible",
+      label: "Local OpenAI-compatible",
+      detected: localDetected && !ollamaDetected,
+      enabled: config.localLlmEnabled && localDetected && !ollamaDetected,
+      source: localDetected ? "localLlmUrl" : "not detected",
+      detail: localLlmUrl || "Local provider endpoint",
     },
   ];
 }
@@ -549,6 +587,7 @@ function createAdminControls(
         values: publicConfigValues(displayConfig, serverConfig),
       },
       harnesses: dashboardHarnesses(displayConfig),
+      providers: dashboardProviders(displayConfig),
       models,
       features: dashboardFeatures(displayConfig),
     };

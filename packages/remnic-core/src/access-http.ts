@@ -101,6 +101,7 @@ export interface RemnicAdminConfigStatus {
 export interface RemnicAdminDashboardStatus {
   config: RemnicAdminConfigStatus;
   harnesses: RemnicAdminHarnessStatus[];
+  providers?: RemnicAdminHarnessStatus[];
   models: RemnicAdminModelOption[];
   features: RemnicAdminFeatureStatus[];
 }

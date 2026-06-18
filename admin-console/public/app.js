@@ -205,6 +205,7 @@ function renderRuntimeDashboard(payload) {
   if (sourceSelect && values.modelSource) sourceSelect.value = String(values.modelSource);
   renderDefaultModelSelect(payload?.models, values);
   renderCompactStatusList($("harnessList"), payload?.harnesses, "No harnesses detected.");
+  renderCompactStatusList($("providerList"), payload?.providers, "No providers detected.");
   renderCompactStatusList($("modelList"), payload?.models, "No models detected.");
   renderFeatureToggles(payload?.features);
   const state = payload?.config?.restartRequired ? "Saved changes require restart." : "Runtime loaded.";
