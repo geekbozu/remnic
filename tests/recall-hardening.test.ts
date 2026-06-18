@@ -889,3 +889,34 @@ test("recallInternal treats qmd settling during the qmd wait as settled before s
   assert.match(context, /qmd settled during wait memory/);
   assert.deepEqual(observedSafetyDeadlines, [null]);
 });
+
+test("cold fallback deadline stops before cold QMD and archive scanning", async () => {
+  const orchestrator = await makeOrchestrator("engram-cold-fallback-deadline-", {
+    qmdColdTierEnabled: true,
+    qmdEnabled: true,
+  });
+
+  let coldQmdReads = 0;
+  let archiveReads = 0;
+  (orchestrator as any).qmd = { isAvailable: () => true };
+  (orchestrator as any).fetchQmdMemoryResultsWithArtifactTopUp = async () => {
+    coldQmdReads += 1;
+    return [];
+  };
+  (orchestrator as any).readArchivedMemoriesForNamespaces = async () => {
+    archiveReads += 1;
+    return [];
+  };
+
+  const results = await (orchestrator as any).applyColdFallbackPipeline({
+    prompt: "archive deadline test",
+    recallNamespaces: ["default"],
+    recallResultLimit: 5,
+    recallMode: "minimal",
+    deadlineAtMs: Date.now() - 1,
+  });
+
+  assert.deepEqual(results, []);
+  assert.equal(coldQmdReads, 0);
+  assert.equal(archiveReads, 0);
+});

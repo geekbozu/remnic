@@ -501,7 +501,7 @@ test("recall safety filtering is available without running score boosts", async 
       { docid: "dream", path: dream, snippet: "dream", score: 0.7 },
     ],
     undefined,
-    {},
+    { dropUnresolved: true },
   );
 
   assert.deepEqual(
@@ -547,6 +547,36 @@ test("absolute QMD result paths read through dynamic namespace owner storage", a
   assert.equal(fallbackReads, 0);
   assert.equal(memory?.path, ownedPath);
   assert.equal(memory?.frontmatter.id, "fact-owned");
+});
+
+test("recall safety filtering drops QMD paths that fail resolution", async () => {
+  const memoryDir = await makeTmpDir("engram-recall-safety-unresolved-qmd-");
+  const factsDir = path.join(memoryDir, "facts");
+  await mkdir(factsDir, { recursive: true });
+  const active = await writeMemory(factsDir, "fact-active");
+
+  const orchestrator = await makeOrchestrator(memoryDir);
+  (orchestrator as any).initPromise = null;
+  const qmdCollection = (orchestrator as any).config.qmdCollection;
+
+  const filtered = await (orchestrator as any).filterSearchResultsForRecall(
+    [
+      { docid: "active", path: active, snippet: "active", score: 0.4 },
+      {
+        docid: "escape",
+        path: `${qmdCollection}/../other/fact.md`,
+        snippet: "unchecked traversal hit",
+        score: 0.9,
+      },
+    ],
+    undefined,
+    { dropUnresolved: true },
+  );
+
+  assert.deepEqual(
+    filtered.results.map((result: { path: string }) => path.basename(result.path)),
+    ["fact-active.md"],
+  );
 });
 
 test("recall safety filtering does not return unchecked results after deadline", async () => {

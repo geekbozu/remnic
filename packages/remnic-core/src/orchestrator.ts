@@ -9728,6 +9728,7 @@ export class Orchestrator {
             ? null
             : enrichmentAssemblyDeadlineAtMs,
           abortSignal: options.abortSignal,
+          dropUnresolved: true,
         },
       );
 
@@ -16300,6 +16301,50 @@ export class Orchestrator {
       if (options.xrayPoolSizeSink) options.xrayPoolSizeSink.size = 0;
       return [];
     }
+    const deadlineRemainingMs = (): number | null =>
+      typeof options.deadlineAtMs === "number"
+        ? Math.max(0, options.deadlineAtMs - Date.now())
+        : null;
+    const runColdStepWithinDeadline = async <T>(
+      label: string,
+      fallback: T,
+      task: () => Promise<T>,
+    ): Promise<T> => {
+      throwIfRecallAborted(options.abortSignal);
+      const remainingMs = deadlineRemainingMs();
+      if (remainingMs === 0) {
+        log.debug(`cold-tier recall ${label} skipped: shared assembly deadline expired`);
+        return fallback;
+      }
+      if (remainingMs === null) return task();
+
+      let timeoutHandle: NodeJS.Timeout | undefined;
+      let timedOut = false;
+      const taskPromise = task().catch((err) => {
+        if (timedOut) {
+          log.debug(`cold-tier recall ${label} failed after deadline: ${err}`);
+          return fallback;
+        }
+        throw err;
+      });
+
+      try {
+        return await Promise.race<T>([
+          taskPromise,
+          new Promise<T>((resolve) => {
+            timeoutHandle = setTimeout(() => {
+              timedOut = true;
+              log.debug(
+                `cold-tier recall ${label} skipped: shared assembly deadline expired`,
+              );
+              resolve(fallback);
+            }, remainingMs);
+          }),
+        ]);
+      } finally {
+        if (timeoutHandle) clearTimeout(timeoutHandle);
+      }
+    };
 
     const coldQmdEnabled = this.config.qmdColdTierEnabled === true;
     const coldCollection =
@@ -16319,19 +16364,24 @@ export class Orchestrator {
           false,
           0,
         );
-        longTerm = await this.fetchQmdMemoryResultsWithArtifactTopUp(
-          options.prompt,
-          coldFetchLimit,
-          coldHybridLimit,
-          {
-            namespacesEnabled: this.config.namespacesEnabled,
-            recallNamespaces: options.recallNamespaces,
-            resolveNamespace: (p) => this.namespaceFromPath(p),
-            collection: coldCollection,
-            queryAwarePrefilter: options.queryAwarePrefilter,
-            searchOptions: this.buildConfiguredQmdSearchOptions(options.prompt),
-            abortSignal: options.abortSignal,
-          },
+        longTerm = await runColdStepWithinDeadline(
+          "qmd lookup",
+          [],
+          () =>
+            this.fetchQmdMemoryResultsWithArtifactTopUp(
+              options.prompt,
+              coldFetchLimit,
+              coldHybridLimit,
+              {
+                namespacesEnabled: this.config.namespacesEnabled,
+                recallNamespaces: options.recallNamespaces,
+                resolveNamespace: (p) => this.namespaceFromPath(p),
+                collection: coldCollection,
+                queryAwarePrefilter: options.queryAwarePrefilter,
+                searchOptions: this.buildConfiguredQmdSearchOptions(options.prompt),
+                abortSignal: options.abortSignal,
+              },
+            ),
         );
         if (longTerm.length > 0) {
           log.debug(
@@ -16341,12 +16391,17 @@ export class Orchestrator {
       }
     }
     if (longTerm.length === 0) {
-      longTerm = await this.searchLongTermArchiveFallback(
-        options.prompt,
-        options.recallNamespaces,
-        options.recallResultLimit,
-        options.queryAwarePrefilter,
-        options.abortSignal,
+      longTerm = await runColdStepWithinDeadline(
+        "archive scan",
+        [],
+        () =>
+          this.searchLongTermArchiveFallback(
+            options.prompt,
+            options.recallNamespaces,
+            options.recallResultLimit,
+            options.queryAwarePrefilter,
+            options.abortSignal,
+          ),
       );
       if (longTerm.length > 0) {
         log.debug("cold-tier recall source=archive-scan");
@@ -16393,6 +16448,7 @@ export class Orchestrator {
         asOfMs: options.asOfMs,
         deadlineAtMs: options.deadlineAtMs,
         abortSignal: options.abortSignal,
+        dropUnresolved: true,
       },
     );
     results = boostInput.results;
@@ -16801,6 +16857,7 @@ export class Orchestrator {
       asOfMs?: number;
       deadlineAtMs?: number | null;
       abortSignal?: AbortSignal;
+      dropUnresolved?: boolean;
     },
   ): Promise<{ results: QmdSearchResult[]; memoryByPath: Map<string, MemoryFile> }> {
     if (results.length === 0) {
@@ -16822,11 +16879,19 @@ export class Orchestrator {
         `recall safety filter stopped before validating all candidates (${candidateResults.length}/${results.length} eligible)`,
       );
     }
+    const blockedPaths = new Set(loaded.unreadablePaths);
+    if (options?.dropUnresolved === true) {
+      for (const resultPath of loaded.checkedPaths) {
+        if (!loaded.memoryByPath.has(resultPath)) {
+          blockedPaths.add(resultPath);
+        }
+      }
+    }
     return {
       results: this.filterSearchResultsByRecallSafety(
         candidateResults,
         loaded.memoryByPath,
-        { ...options, blockedPaths: loaded.unreadablePaths },
+        { ...options, blockedPaths },
       ),
       memoryByPath: loaded.memoryByPath,
     };
