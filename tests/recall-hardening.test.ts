@@ -825,7 +825,7 @@ test("recallInternal shares one enrichment timeout budget across sequential enri
   );
 });
 
-test("recallInternal treats qmd settling during the qmd wait as settled before safety filtering", async () => {
+test("recallInternal keeps qmd safety reads deadline-bound when qmd settles during the qmd wait", async () => {
   clearQmdRecallCache();
   const orchestrator = await makeOrchestrator(
     "engram-recall-qmd-settles-during-wait-",
@@ -887,7 +887,8 @@ test("recallInternal treats qmd settling during the qmd wait as settled before s
   );
 
   assert.match(context, /qmd settled during wait memory/);
-  assert.deepEqual(observedSafetyDeadlines, [null]);
+  assert.equal(observedSafetyDeadlines.length, 1);
+  assert.equal(typeof observedSafetyDeadlines[0], "number");
 });
 
 test("cold fallback deadline stops before cold QMD and archive scanning", async () => {
