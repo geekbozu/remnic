@@ -640,6 +640,91 @@ test("last recall serialization preserves absolute paths from readable namespace
   assert.deepEqual(readCalls, [{ namespace: "shared", path: sharedMemoryPath }]);
 });
 
+test("last recall serialization preserves absolute paths from dynamic namespace storage", async () => {
+  const service = Object.create(EngramAccessService.prototype) as EngramAccessService;
+  const memoryRoot = await mkdtemp(path.join(os.tmpdir(), "remnic-access-dynamic-ns-"));
+  const dynamicNamespace = "team-project-alpha";
+  const dynamicDir = path.join(
+    memoryRoot,
+    "namespaces",
+    namespaceIdentityToken(dynamicNamespace),
+  );
+  const dynamicMemoryPath = path.join(
+    dynamicDir,
+    "facts",
+    "2026-06-16",
+    "fact-dynamic.md",
+  );
+  const dynamicMemory = {
+    path: dynamicMemoryPath,
+    frontmatter: {
+      id: "fact-dynamic",
+      created: "2026-06-16T12:00:00.000Z",
+      updated: "2026-06-16T12:00:00.000Z",
+      category: "fact",
+      status: "active",
+    },
+    content: "Dynamic namespace content should survive serialization.",
+  };
+  const readCalls: Array<{ namespace: string; path: string }> = [];
+  const defaultStorage = {
+    dir: memoryRoot,
+    async readMemoryByPath(filePath: string) {
+      readCalls.push({ namespace: "default", path: filePath });
+      return null;
+    },
+    async getMemoryById() {
+      return null;
+    },
+  } as unknown as StorageManager;
+  const dynamicStorage = {
+    dir: dynamicDir,
+    async readMemoryByPath(filePath: string) {
+      readCalls.push({ namespace: dynamicNamespace, path: filePath });
+      return filePath === dynamicMemoryPath ? dynamicMemory : null;
+    },
+    async getMemoryById() {
+      return null;
+    },
+  } as unknown as StorageManager;
+
+  (service as unknown as {
+    orchestrator: {
+      config: PluginConfig;
+      getStorage(namespace: string): Promise<StorageManager>;
+    };
+  }).orchestrator = {
+    config: { ...makeConfig(), memoryDir: memoryRoot },
+    async getStorage(namespace: string) {
+      return namespace === dynamicNamespace ? dynamicStorage : defaultStorage;
+    },
+  };
+
+  const result = await (service as unknown as {
+    serializeRecallResults(
+      snapshot: unknown,
+      disclosure: "summary",
+    ): Promise<Array<{ id: string; path: string; preview: string; status: string }>>;
+  }).serializeRecallResults(
+    {
+      sessionKey: "session-1",
+      recordedAt: "2026-06-16T12:00:00.000Z",
+      queryHash: "hash",
+      queryLen: 4,
+      memoryIds: [],
+      namespace: "team",
+      resultPaths: [dynamicMemoryPath],
+    },
+    "summary",
+  );
+
+  assert.equal(result.length, 1);
+  assert.equal(result[0].id, "fact-dynamic");
+  assert.deepEqual(readCalls, [
+    { namespace: dynamicNamespace, path: dynamicMemoryPath },
+  ]);
+});
+
 test("last recall serialization rejects traversing collection paths", async () => {
   const service = Object.create(EngramAccessService.prototype) as EngramAccessService;
   const memoryRoot = await mkdtemp(path.join(os.tmpdir(), "remnic-access-qmd-traversal-"));

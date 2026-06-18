@@ -686,11 +686,18 @@ describe("GraphIndex.spreadingActivation — assembly deadlines", () => {
         label: "deadline",
         ts: new Date().toISOString(),
       });
+      let edgeCacheLoaded = false;
+      (gi as unknown as { loadEdgesCached(): Promise<unknown[]> }).loadEdgesCached =
+        async () => {
+          edgeCacheLoaded = true;
+          return [];
+        };
       const startedAt = Date.now();
       const results = await gi.spreadingActivation(["A.md"], 3, {
         deadlineAtMs: startedAt - 1,
       });
       assert.deepEqual(results, []);
+      assert.equal(edgeCacheLoaded, false);
       assert.ok(Date.now() - startedAt < 100, "expired deadline should fail open quickly");
     } finally {
       await rm(dir, { recursive: true, force: true });
@@ -718,7 +725,7 @@ describe("GraphIndex.spreadingActivation — assembly deadlines", () => {
       let calls = 0;
       Date.now = () => {
         calls += 1;
-        return calls < 6 ? 1_000 : 2_000;
+        return calls < 7 ? 1_000 : 2_000;
       };
 
       const results = await gi.spreadingActivation(["A.md"], 1, {

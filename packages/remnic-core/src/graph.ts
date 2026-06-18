@@ -552,6 +552,7 @@ export class GraphIndex {
       typeof deadlineAtMs === "number" && Date.now() >= deadlineAtMs;
 
     try {
+      if (deadlineExpired()) return [];
       const allEdges = await this.loadEdgesCached();
       if (deadlineExpired()) return [];
 

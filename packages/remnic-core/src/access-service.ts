@@ -1671,20 +1671,34 @@ export class EngramAccessService {
     primaryNamespace: string,
   ): Promise<{ storage: StorageManager; dir: string } | null> {
     const resolvedPath = nodePath.resolve(memoryPath);
+    const memoryRoot = nodePath.resolve(this.orchestrator.config.memoryDir);
+    const namespacesRoot = nodePath.join(memoryRoot, "namespaces");
     const configuredNamespaces = new Set<string>();
     configuredNamespaces.add(primaryNamespace);
     configuredNamespaces.add(this.orchestrator.config.defaultNamespace);
     configuredNamespaces.add(this.orchestrator.config.sharedNamespace);
+    if (isPathInsideStorageRoot(namespacesRoot, resolvedPath)) {
+      const relativeToNamespaces = nodePath.relative(namespacesRoot, resolvedPath);
+      const [namespaceSegment] = relativeToNamespaces.split(/[\\/]/);
+      if (namespaceSegment) {
+        configuredNamespaces.add(
+          namespaceIdentityFromToken(namespaceSegment) ?? namespaceSegment,
+        );
+      }
+    }
     for (const policy of this.orchestrator.config.namespacePolicies ?? []) {
       configuredNamespaces.add(policy.name);
     }
 
-    const memoryRoot = nodePath.resolve(this.orchestrator.config.memoryDir);
-    const namespacesRoot = nodePath.join(memoryRoot, "namespaces");
     const matches: Array<{ storage: StorageManager; dir: string }> = [];
     for (const ns of configuredNamespaces) {
       if (!ns) continue;
-      const candidateStorage = await this.orchestrator.getStorage(ns);
+      let candidateStorage: StorageManager;
+      try {
+        candidateStorage = await this.orchestrator.getStorage(ns);
+      } catch {
+        continue;
+      }
       const candidateRoot = nodePath.resolve(candidateStorage.dir);
       if (!isPathInsideStorageRoot(candidateRoot, resolvedPath)) continue;
       if (

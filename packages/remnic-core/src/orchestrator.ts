@@ -16614,14 +16614,20 @@ export class Orchestrator {
       allowLifecycleFiltered?: boolean;
       allowDedicatedSurface?: boolean;
       asOfMs?: number;
+      blockedPaths?: Set<string>;
     },
   ): QmdSearchResult[] {
     let lifecycleFilteredCount = 0;
     let temporalSupersededFilteredCount = 0;
     let dedicatedSurfaceFilteredCount = 0;
     let forgottenFilteredCount = 0;
+    let blockedPathFilteredCount = 0;
     const filtered: QmdSearchResult[] = [];
     for (const r of results) {
+      if (r.path && options?.blockedPaths?.has(r.path)) {
+        blockedPathFilteredCount += 1;
+        continue;
+      }
       const memory = memoryByPath.get(r.path);
       if (memory) {
         if (memory.frontmatter.status === "forgotten") {
@@ -16707,6 +16713,11 @@ export class Orchestrator {
         `forgotten status filter removed ${forgottenFilteredCount} candidates from recall`,
       );
     }
+    if (blockedPathFilteredCount > 0) {
+      log.debug(
+        `unreadable-path filter removed ${blockedPathFilteredCount} candidates from recall`,
+      );
+    }
     return filtered;
   }
 
@@ -16735,22 +16746,16 @@ export class Orchestrator {
     const candidateResults = loaded.completed
       ? results
       : results.filter((result) => !result.path || loaded.checkedPaths.has(result.path));
-    const readableCandidateResults =
-      loaded.unreadablePaths.size === 0
-        ? candidateResults
-        : candidateResults.filter(
-            (result) => !result.path || !loaded.unreadablePaths.has(result.path),
-          );
     if (!loaded.completed) {
       log.debug(
-        `recall safety filter stopped before validating all candidates (${readableCandidateResults.length}/${results.length} eligible)`,
+        `recall safety filter stopped before validating all candidates (${candidateResults.length}/${results.length} eligible)`,
       );
     }
     return {
       results: this.filterSearchResultsByRecallSafety(
-        readableCandidateResults,
+        candidateResults,
         loaded.memoryByPath,
-        options,
+        { ...options, blockedPaths: loaded.unreadablePaths },
       ),
       memoryByPath: loaded.memoryByPath,
     };
