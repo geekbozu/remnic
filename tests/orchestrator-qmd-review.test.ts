@@ -645,6 +645,14 @@ test("graph expansion resolves cold collection seeds from active recall namespac
       ? runtimeStorage
       : originalStorageFor(namespace);
 
+  const originalReadQmdResultMemory =
+    orchestrator.readQmdResultMemory.bind(orchestrator);
+  let qmdMemoryReads = 0;
+  orchestrator.readQmdResultMemory = async (...args: unknown[]) => {
+    qmdMemoryReads += 1;
+    return originalReadQmdResultMemory(...args);
+  };
+
   let graphSeedPaths: string[] = [];
   orchestrator.graphIndexFor = () => ({
     spreadingActivation: async (seedPaths: string[]) => {
@@ -662,10 +670,11 @@ test("graph expansion resolves cold collection seeds from active recall namespac
         score: 0.9,
       },
     ],
-    recallNamespaces: ["runtime-cold"],
+    recallNamespaces: ["missing-cold", "runtime-cold", "other-cold"],
     recallResultLimit: 2,
   });
 
+  assert.equal(qmdMemoryReads, 1);
   assert.deepEqual(expanded.seedPaths, [migrated.targetPath]);
   assert.deepEqual(graphSeedPaths, [
     path.relative(runtimeStorage.dir, migrated.targetPath).split(path.sep).join("/"),

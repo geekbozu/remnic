@@ -5999,6 +5999,9 @@ export class Orchestrator {
     expandedPaths: GraphRecallExpandedEntry[];
     seedResults: QmdSearchResult[];
   }> {
+    const deadlineExpired = (): boolean =>
+      typeof options.deadlineAtMs === "number" &&
+      Date.now() >= options.deadlineAtMs;
     const byNamespace = new Map<string, QmdSearchResult[]>();
     const addResultForNamespace = (
       namespace: string,
@@ -6011,23 +6014,74 @@ export class Orchestrator {
         byNamespace.set(namespace, [result]);
       }
     };
+    const resolvedAmbiguousSeeds = new Map<
+      string,
+      { namespace: string; result: QmdSearchResult } | null
+    >();
+    const resolveAmbiguousSeedOwner = async (
+      result: QmdSearchResult,
+      parts: { collection: string; relativePath: string } | null,
+    ): Promise<{ namespace: string; result: QmdSearchResult } | null> => {
+      const cached = resolvedAmbiguousSeeds.get(result.path);
+      if (cached !== undefined) return cached;
+      if (deadlineExpired()) {
+        resolvedAmbiguousSeeds.set(result.path, null);
+        return null;
+      }
+
+      let resolvedPath = result.path;
+      let resolvedResult = result;
+      if (parts) {
+        const memory = await this.readQmdResultMemory(
+          result.path,
+          this.storage,
+          options.recallNamespaces,
+        );
+        if (!memory || deadlineExpired()) {
+          resolvedAmbiguousSeeds.set(result.path, null);
+          return null;
+        }
+        resolvedPath = memory.path;
+        resolvedResult = {
+          ...result,
+          docid: result.docid || memory.frontmatter.id,
+          path: memory.path,
+          snippet: result.snippet || memory.content.slice(0, 400),
+        };
+      }
+
+      if (!path.isAbsolute(resolvedPath)) {
+        resolvedAmbiguousSeeds.set(result.path, null);
+        return null;
+      }
+      const ownerStorage = await this.storageForAbsoluteQmdResultPath(
+        resolvedPath,
+        this.storage,
+        options.recallNamespaces,
+      );
+      const ownerNamespace = ownerStorage?.namespace ?? null;
+      const resolved =
+        ownerNamespace && options.recallNamespaces.includes(ownerNamespace)
+          ? { namespace: ownerNamespace, result: resolvedResult }
+          : null;
+      resolvedAmbiguousSeeds.set(result.path, resolved);
+      return resolved;
+    };
     const coldCollection = this.config.qmdColdCollection ?? "openclaw-engram-cold";
     for (const result of options.memoryResults) {
+      if (deadlineExpired()) break;
       const parts = qmdCollectionPathParts(result.path);
       if (parts?.collection === coldCollection) {
-        for (const namespace of options.recallNamespaces) {
-          addResultForNamespace(namespace, result);
+        const resolved = await resolveAmbiguousSeedOwner(result, parts);
+        if (resolved) {
+          addResultForNamespace(resolved.namespace, resolved.result);
         }
         continue;
       }
       if (path.isAbsolute(result.path)) {
-        const ns = this.namespaceFromPath(result.path);
-        if (options.recallNamespaces.includes(ns)) {
-          addResultForNamespace(ns, result);
-        } else {
-          for (const namespace of options.recallNamespaces) {
-            addResultForNamespace(namespace, result);
-          }
+        const resolved = await resolveAmbiguousSeedOwner(result, null);
+        if (resolved) {
+          addResultForNamespace(resolved.namespace, resolved.result);
         }
         continue;
       }
@@ -6042,9 +6096,6 @@ export class Orchestrator {
     const seedResults: QmdSearchResult[] = [];
     const expandedPaths: GraphRecallExpandedEntry[] = [];
     const expandedResults: QmdSearchResult[] = [];
-    const deadlineExpired = (): boolean =>
-      typeof options.deadlineAtMs === "number" &&
-      Date.now() >= options.deadlineAtMs;
 
     for (const [namespace, nsResults] of byNamespace.entries()) {
       if (deadlineExpired()) break;
@@ -15875,14 +15926,19 @@ export class Orchestrator {
     resultPath: string,
     fallbackStorage: StorageManager,
     recallNamespaces: readonly string[] = [],
-  ): Promise<{ storage: StorageManager; dir: string } | null> {
+  ): Promise<{ storage: StorageManager; dir: string; namespace: string } | null> {
     const resolvedPath = path.resolve(resultPath);
     const memoryRoot = path.resolve(this.config.memoryDir);
     const namespacesRoot = path.join(memoryRoot, "namespaces");
-    const matches: Array<{ storage: StorageManager; dir: string }> = [];
+    const fallbackStorageDir =
+      typeof (fallbackStorage as { dir?: unknown }).dir === "string" &&
+      (fallbackStorage as { dir?: string }).dir
+        ? (fallbackStorage as { dir: string }).dir
+        : null;
+    const matches: Array<{ storage: StorageManager; dir: string; namespace: string }> = [];
     const seenDirs = new Set<string>();
 
-    const maybeAddStorage = (storage: StorageManager) => {
+    const maybeAddStorage = (storage: StorageManager, namespace: string) => {
       const storageDir =
         typeof (storage as { dir?: unknown }).dir === "string" &&
         (storage as { dir?: string }).dir
@@ -15899,10 +15955,14 @@ export class Orchestrator {
         return;
       }
       seenDirs.add(candidateRoot);
-      matches.push({ storage, dir: candidateRoot });
+      matches.push({ storage, dir: candidateRoot, namespace });
     };
 
-    maybeAddStorage(fallbackStorage);
+    const fallbackNamespace =
+      fallbackStorageDir !== null
+        ? this.namespaceFromStorageDir(fallbackStorageDir)
+        : this.config.defaultNamespace;
+    maybeAddStorage(fallbackStorage, fallbackNamespace);
 
     const candidateNamespaces = new Set<string>();
     candidateNamespaces.add(this.config.defaultNamespace);
@@ -15926,7 +15986,7 @@ export class Orchestrator {
     for (const ns of candidateNamespaces) {
       if (!ns) continue;
       try {
-        maybeAddStorage(await this.storageRouter.storageFor(ns));
+        maybeAddStorage(await this.storageRouter.storageFor(ns), ns);
       } catch {
         continue;
       }
