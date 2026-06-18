@@ -341,7 +341,11 @@ import {
   dedupeBehaviorSignalsByMemoryAndHash,
 } from "./behavior-signals.js";
 import { ProfilingCollector } from "./profiling.js";
-import { keyring, secureStoreDir } from "./secure-store/index.js";
+import {
+  keyring,
+  secureStoreDir,
+  SecureStoreLockedError,
+} from "./secure-store/index.js";
 import type {
   AccessTrackingEntry,
   BehaviorLoopPolicyState,
@@ -745,9 +749,6 @@ function qmdResultPathCandidates(
   } else {
     addRelativeCandidates(resultPath);
   }
-
-  const parts = qmdCollectionPathParts(resultPath);
-  if (parts) addRelativeCandidates(parts.relativePath);
 
   return [...candidates];
 }
@@ -8791,17 +8792,18 @@ export class Orchestrator {
     // several seconds on large box directories due to sequential I/O). We kick it
     // off here so it overlaps with QMD and other concurrent work rather than
     // running sequentially in phase-2 and blocking assembly.
-    const recentBoxesPromise: Promise<BoxFrontmatter[]> =
+    const recentBoxesPromise = observeEnrichmentPromise(
       this.isRecallSectionEnabled(
         "memory-boxes",
         this.config.memoryBoxesEnabled === true,
       ) &&
-      this.config.memoryBoxesEnabled &&
-      this.config.boxRecallDays > 0
+        this.config.memoryBoxesEnabled &&
+        this.config.boxRecallDays > 0
         ? this.boxBuilderFor(profileStorage)
             .readRecentBoxes(this.config.boxRecallDays)
             .catch(() => [] as BoxFrontmatter[])
-        : Promise.resolve([] as BoxFrontmatter[]);
+        : Promise.resolve([] as BoxFrontmatter[]),
+    );
 
     // --- Wait for core sections first, then bounded enrichment ---
     this.profiler.startSpan("phase-1-parallel", profileTraceId);
@@ -9381,8 +9383,11 @@ export class Orchestrator {
     // 1d. Memory Boxes (topic continuity windows, v8.0 Phase 2A)
     // recentBoxesPromise was kicked off before phase-1 so it ran concurrently.
     {
-      const recentBoxes = await recentBoxesPromise;
-      if (recentBoxes.length > 0) {
+      const recentBoxes = await awaitEnrichmentSection(
+        "memory-boxes",
+        recentBoxesPromise,
+      );
+      if (recentBoxes && recentBoxes.length > 0) {
         const boxLines = recentBoxes.slice(0, 5).map((b: BoxFrontmatter) => {
           const sealedDate = b.sealedAt
             ? b.sealedAt.slice(0, 16).replace("T", " ")
@@ -9536,6 +9541,8 @@ export class Orchestrator {
     }
 
     // 2. QMD results — post-process and format
+    const qmdWasSettledBeforeFormatting =
+      qmdPromise.getSettledOutcome() !== undefined;
     const qmdResult = await awaitEnrichmentSection("qmd", qmdPromise);
     if (qmdResult) {
       const t0 = Date.now();
@@ -9705,7 +9712,13 @@ export class Orchestrator {
         undefined,
         {
           asOfMs,
-          deadlineAtMs: enrichmentAssemblyDeadlineAtMs,
+          // If QMD itself already settled before formatting starts, do not let
+          // an unrelated slow enrichment section turn those known results into
+          // unchecked misses. Mandatory safety still runs; optional scoring
+          // below remains bounded by awaitAssemblyStep.
+          deadlineAtMs: qmdWasSettledBeforeFormatting
+            ? null
+            : enrichmentAssemblyDeadlineAtMs,
           abortSignal: options.abortSignal,
         },
       );
@@ -15689,6 +15702,7 @@ export class Orchestrator {
         }
         return null;
       } catch (err) {
+        if (err instanceof SecureStoreLockedError) throw err;
         log.debug("qmd result namespace path lookup failed open", {
           path: resultPath,
           namespace: collectionNamespace,
@@ -16510,15 +16524,26 @@ export class Orchestrator {
   ): Promise<{
     memoryByPath: Map<string, MemoryFile>;
     checkedPaths: Set<string>;
+    unreadablePaths: Set<string>;
     completed: boolean;
   }> {
     const memoryByPath: Map<string, MemoryFile> = preloadedMemoryMap
       ? new Map(preloadedMemoryMap)
       : new Map();
     const checkedPaths = new Set<string>();
+    const unreadablePaths = new Set<string>();
 
     const markChecked = (result: QmdSearchResult): void => {
       if (result.path) checkedPaths.add(result.path);
+    };
+    const markUnreadable = (result: QmdSearchResult, err: unknown): void => {
+      if (!result.path) return;
+      checkedPaths.add(result.path);
+      unreadablePaths.add(result.path);
+      log.warn("recall safety filter dropped unreadable secure-store candidate", {
+        path: result.path,
+        error: (err as Error).message,
+      });
     };
     const deadlineExpired = (): boolean =>
       typeof options?.deadlineAtMs === "number" &&
@@ -16532,13 +16557,21 @@ export class Orchestrator {
             markChecked(r);
             return;
           }
-          const mem = await this.readQmdResultMemory(r.path, this.storage);
-          markChecked(r);
-          if (mem) memoryByPath.set(r.path, mem);
+          try {
+            const mem = await this.readQmdResultMemory(r.path, this.storage);
+            markChecked(r);
+            if (mem) memoryByPath.set(r.path, mem);
+          } catch (err) {
+            if (err instanceof SecureStoreLockedError) {
+              markUnreadable(r, err);
+              return;
+            }
+            throw err;
+          }
         }),
       );
 
-      return { memoryByPath, checkedPaths, completed: true };
+      return { memoryByPath, checkedPaths, unreadablePaths, completed: true };
     }
 
     for (const result of results) {
@@ -16548,14 +16581,22 @@ export class Orchestrator {
         continue;
       }
       if (options?.abortSignal?.aborted || deadlineExpired()) {
-        return { memoryByPath, checkedPaths, completed: false };
+        return { memoryByPath, checkedPaths, unreadablePaths, completed: false };
       }
-      const mem = await this.readQmdResultMemory(result.path, this.storage);
-      markChecked(result);
-      if (mem) memoryByPath.set(result.path, mem);
+      try {
+        const mem = await this.readQmdResultMemory(result.path, this.storage);
+        markChecked(result);
+        if (mem) memoryByPath.set(result.path, mem);
+      } catch (err) {
+        if (err instanceof SecureStoreLockedError) {
+          markUnreadable(result, err);
+          continue;
+        }
+        throw err;
+      }
     }
 
-    return { memoryByPath, checkedPaths, completed: true };
+    return { memoryByPath, checkedPaths, unreadablePaths, completed: true };
   }
 
   private filterSearchResultsByRecallSafety(
@@ -16686,14 +16727,20 @@ export class Orchestrator {
     const candidateResults = loaded.completed
       ? results
       : results.filter((result) => !result.path || loaded.checkedPaths.has(result.path));
+    const readableCandidateResults =
+      loaded.unreadablePaths.size === 0
+        ? candidateResults
+        : candidateResults.filter(
+            (result) => !result.path || !loaded.unreadablePaths.has(result.path),
+          );
     if (!loaded.completed) {
       log.debug(
-        `recall safety filter stopped before validating all candidates (${candidateResults.length}/${results.length} eligible)`,
+        `recall safety filter stopped before validating all candidates (${readableCandidateResults.length}/${results.length} eligible)`,
       );
     }
     return {
       results: this.filterSearchResultsByRecallSafety(
-        candidateResults,
+        readableCandidateResults,
         loaded.memoryByPath,
         options,
       ),

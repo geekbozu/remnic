@@ -20,6 +20,7 @@ import {
   buildXraySnapshot,
   type RecallXrayResult,
 } from "../src/recall-xray.js";
+import { SecureStoreLockedError } from "../src/secure-store/index.js";
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
@@ -360,6 +361,42 @@ test("namespace collection misses do not fall back to default storage", async ()
   assert.strictEqual(result[0].explain?.reinforcementBoost, undefined);
 });
 
+test("invalid QMD collection prefixes do not strip into default storage", async () => {
+  const memoryDir = await makeTmpDir("engram-reinforce-qmd-invalid-prefix-");
+  const defaultDayDir = path.join(memoryDir, "facts", "2026-06-16");
+  await mkdir(defaultDayDir, { recursive: true });
+  await writeMemory(defaultDayDir, "fact-invalid-prefix", {
+    reinforcement_count: 9,
+  });
+
+  const orchestrator = await makeOrchestrator(memoryDir, {
+    namespacesEnabled: true,
+    defaultNamespace: "default",
+    sharedNamespace: "shared",
+    qmdCollection: "openclaw-engram",
+    reinforcementRecallBoostEnabled: true,
+    reinforcementRecallBoostWeight: 0.1,
+    reinforcementRecallBoostMax: 1.0,
+  });
+  (orchestrator as any).initPromise = null;
+
+  const result = await (orchestrator as any).boostSearchResults(
+    [
+      {
+        docid: "fact-invalid-prefix",
+        path: "openclaw-engram--not-a-token/2026-06-16/fact-invalid-prefix.md",
+        snippet: "invalid collection prefix",
+        score: 0.5,
+      },
+    ],
+    ["default"],
+  );
+
+  assert.equal(result.length, 1);
+  assert.strictEqual(result[0].score, 0.5);
+  assert.strictEqual(result[0].explain?.reinforcementBoost, undefined);
+});
+
 test("date-relative QMD misses do not fall back to storage root basename", async () => {
   const memoryDir = await makeTmpDir("engram-reinforce-qmd-date-miss-");
   await writeMemory(memoryDir, "fact-001", {
@@ -486,6 +523,30 @@ test("recall safety filtering keeps checked candidates when deadline expires mid
   } finally {
     Date.now = realDateNow;
   }
+});
+
+test("recall safety filtering drops locked secure-store candidates", async () => {
+  const memoryDir = await makeTmpDir("engram-recall-safety-secure-lock-");
+  const factsDir = path.join(memoryDir, "facts");
+  await mkdir(factsDir, { recursive: true });
+  const locked = await writeMemory(factsDir, "fact-locked");
+
+  const orchestrator = await makeOrchestrator(memoryDir);
+  (orchestrator as any).initPromise = null;
+  let readAttempts = 0;
+  (orchestrator as any).readQmdResultMemory = async () => {
+    readAttempts += 1;
+    throw new SecureStoreLockedError("locked namespace store");
+  };
+
+  const filtered = await (orchestrator as any).filterSearchResultsForRecall(
+    [{ docid: "locked", path: locked, snippet: "locked candidate", score: 0.9 }],
+    undefined,
+    {},
+  );
+
+  assert.equal(readAttempts, 1);
+  assert.deepEqual(filtered.results, []);
 });
 
 test("boost capped at reinforcementRecallBoostMax", async () => {

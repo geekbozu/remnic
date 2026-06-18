@@ -205,9 +205,6 @@ function qmdResultPathCandidates(
     addRelativeCandidates(resultPath);
   }
 
-  const parts = qmdCollectionPathParts(resultPath);
-  if (parts) addRelativeCandidates(parts.relativePath);
-
   return [...candidates];
 }
 
