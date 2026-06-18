@@ -56,6 +56,7 @@ import { getMemoryProjectionPath } from "./memory-projection-store.js";
 import { canReadNamespace, canWriteNamespace, defaultNamespaceForPrincipal, recallNamespacesForPrincipal, resolvePrincipal } from "./namespaces/principal.js";
 import { namespaceIdentityFromToken } from "./namespaces/identity.js";
 import { namespaceCollectionName } from "./namespaces/search.js";
+import { SecureStoreLockedError } from "./secure-store/index.js";
 import type { LastRecallSnapshot } from "./recall-state.js";
 import type {
   GraphRecallSnapshot,
@@ -1578,7 +1579,8 @@ export class EngramAccessService {
             if (memory) return { memory, baseDir: collectionStorage.dir };
           }
           return null;
-        } catch {
+        } catch (err) {
+          if (err instanceof SecureStoreLockedError) throw err;
           return null;
         }
       }

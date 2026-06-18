@@ -8,6 +8,7 @@ import test from "node:test";
 import { EngramAccessInputError, EngramAccessService } from "./access-service.js";
 import { namespaceIdentityToken } from "./namespaces/identity.js";
 import { namespaceCollectionName } from "./namespaces/search.js";
+import { SecureStoreLockedError } from "./secure-store/index.js";
 import type { StorageManager } from "./storage.js";
 import type { PluginConfig } from "./types.js";
 
@@ -336,6 +337,73 @@ test("last recall serialization does not fall back after namespace collection mi
   assert.ok(
     readCalls.every((call) => call.namespace === "team"),
     "expected recognized collection-prefixed miss not to probe default storage",
+  );
+});
+
+test("last recall serialization propagates locked namespace collection errors", async () => {
+  const service = Object.create(EngramAccessService.prototype) as EngramAccessService;
+  const memoryRoot = await mkdtemp(path.join(os.tmpdir(), "remnic-access-qmd-lock-"));
+  const teamDir = path.join(
+    memoryRoot,
+    "namespaces",
+    namespaceIdentityToken("team"),
+  );
+  const storage = {
+    dir: memoryRoot,
+    async readMemoryByPath() {
+      return null;
+    },
+    async getMemoryById() {
+      return null;
+    },
+  } as unknown as StorageManager;
+  const teamStorage = {
+    dir: teamDir,
+    async readMemoryByPath() {
+      throw new SecureStoreLockedError("locked namespace store");
+    },
+    async getMemoryById() {
+      return null;
+    },
+  } as unknown as StorageManager;
+
+  (service as unknown as {
+    orchestrator: {
+      config: PluginConfig;
+      getStorage(namespace: string): Promise<StorageManager>;
+    };
+  }).orchestrator = {
+    config: makeConfig(),
+    async getStorage(namespace: string) {
+      return namespace === "team" ? teamStorage : storage;
+    },
+  };
+
+  const collection = namespaceCollectionName("test-memory", "team", {
+    defaultNamespace: "default",
+    useLegacyDefaultCollection: false,
+  });
+
+  await assert.rejects(
+    async () =>
+      await (service as unknown as {
+        serializeRecallResults(
+          snapshot: unknown,
+          disclosure: "summary",
+        ): Promise<Array<{ id: string; path: string; preview: string; status: string }>>;
+      }).serializeRecallResults(
+        {
+          sessionKey: "session-1",
+          recordedAt: "2026-06-16T12:00:00.000Z",
+          queryHash: "hash",
+          queryLen: 4,
+          memoryIds: [],
+          namespace: "default",
+          resultPaths: [`${collection}/2026-06-16/fact-001.md`],
+        },
+        "summary",
+      ),
+    SecureStoreLockedError,
   );
 });
 
