@@ -6032,22 +6032,17 @@ export class Orchestrator {
       let resolvedPath = result.path;
       let resolvedResult = result;
       if (parts) {
-        const memory = await this.readQmdResultMemory(
-          result.path,
+        const resolvedCold = await this.resolveColdQmdResultForRecall(
+          result,
           this.storage,
           options.recallNamespaces,
         );
-        if (!memory || deadlineExpired()) {
+        if (!resolvedCold || deadlineExpired()) {
           resolvedAmbiguousSeeds.set(result.path, null);
           return null;
         }
-        resolvedPath = memory.path;
-        resolvedResult = {
-          ...result,
-          docid: result.docid || memory.frontmatter.id,
-          path: memory.path,
-          snippet: result.snippet || memory.content.slice(0, 400),
-        };
+        resolvedPath = resolvedCold.result.path;
+        resolvedResult = resolvedCold.result;
       }
 
       if (!path.isAbsolute(resolvedPath)) {
@@ -15922,6 +15917,47 @@ export class Orchestrator {
     return null;
   }
 
+  private async resolveColdQmdResultForRecall(
+    result: QmdSearchResult,
+    fallbackStorage: StorageManager,
+    recallNamespaces: readonly string[] = [],
+  ): Promise<{ namespace: string; result: QmdSearchResult } | null> {
+    const memory = await this.readQmdResultMemory(
+      result.path,
+      fallbackStorage,
+      recallNamespaces,
+    );
+    if (!memory) return null;
+
+    let ownerNamespace: string | null = null;
+    if (path.isAbsolute(memory.path)) {
+      const ownerStorage = await this.storageForAbsoluteQmdResultPath(
+        memory.path,
+        fallbackStorage,
+        recallNamespaces,
+      );
+      ownerNamespace = ownerStorage?.namespace ?? null;
+      if (!ownerNamespace && this.config.namespacesEnabled) return null;
+    }
+    ownerNamespace ??= this.namespaceFromPath(memory.path);
+    if (
+      recallNamespaces.length > 0 &&
+      !recallNamespaces.includes(ownerNamespace)
+    ) {
+      return null;
+    }
+
+    return {
+      namespace: ownerNamespace,
+      result: {
+        ...result,
+        docid: result.docid || memory.frontmatter.id,
+        path: memory.path,
+        snippet: result.snippet || memory.content.slice(0, 400),
+      },
+    };
+  }
+
   private async storageForAbsoluteQmdResultPath(
     resultPath: string,
     fallbackStorage: StorageManager,
@@ -16627,21 +16663,35 @@ export class Orchestrator {
           });
         }
       }
-      results = results.filter((r) => {
-        const parts = qmdCollectionPathParts(r.path);
-        if (parts?.collection === coldCollection) return true;
-        if (path.isAbsolute(r.path)) {
-          const resolvedPath = path.resolve(r.path);
+      const scopedResults: QmdSearchResult[] = [];
+      for (const result of results) {
+        if (options.abortSignal?.aborted || deadlineRemainingMs() === 0) break;
+        const parts = qmdCollectionPathParts(result.path);
+        if (parts?.collection === coldCollection) {
+          const resolvedCold = await this.resolveColdQmdResultForRecall(
+            result,
+            this.storage,
+            options.recallNamespaces,
+          );
+          if (resolvedCold) scopedResults.push(resolvedCold.result);
+          continue;
+        }
+        if (path.isAbsolute(result.path)) {
+          const resolvedPath = path.resolve(result.path);
           if (
             recallRoots.some((recallRoot) =>
               isPathInsideStorageRoot(recallRoot, resolvedPath),
             )
           ) {
-            return true;
+            scopedResults.push(result);
           }
+          continue;
         }
-        return options.recallNamespaces.includes(this.namespaceFromPath(r.path));
-      });
+        if (options.recallNamespaces.includes(this.namespaceFromPath(result.path))) {
+          scopedResults.push(result);
+        }
+      }
+      results = scopedResults;
     }
     // Artifact isolation contract: generic recall paths must exclude artifacts.
     results = results.filter((r) => !isArtifactMemoryPath(r.path));
