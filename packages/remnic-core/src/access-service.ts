@@ -1593,6 +1593,22 @@ export class EngramAccessService {
         }
       }
 
+      if (nodePath.isAbsolute(memoryPath)) {
+        const ownerStorage = await this.storageForAbsoluteRecallPath(
+          memoryPath,
+          namespace,
+        );
+        if (!ownerStorage) return null;
+        for (const candidate of qmdResultPathCandidates(
+          ownerStorage.dir,
+          memoryPath,
+        )) {
+          const memory = await ownerStorage.storage.readMemoryByPath(candidate);
+          if (memory) return { memory, baseDir: ownerStorage.dir };
+        }
+        return null;
+      }
+
       for (const candidate of qmdResultPathCandidates(storageDir, memoryPath)) {
         const memory = await storage.readMemoryByPath(candidate);
         if (memory) return { memory, baseDir: storageDir };
@@ -1648,6 +1664,40 @@ export class EngramAccessService {
       );
     }
     return results;
+  }
+
+  private async storageForAbsoluteRecallPath(
+    memoryPath: string,
+    primaryNamespace: string,
+  ): Promise<{ storage: StorageManager; dir: string } | null> {
+    const resolvedPath = nodePath.resolve(memoryPath);
+    const configuredNamespaces = new Set<string>();
+    configuredNamespaces.add(primaryNamespace);
+    configuredNamespaces.add(this.orchestrator.config.defaultNamespace);
+    configuredNamespaces.add(this.orchestrator.config.sharedNamespace);
+    for (const policy of this.orchestrator.config.namespacePolicies ?? []) {
+      configuredNamespaces.add(policy.name);
+    }
+
+    const memoryRoot = nodePath.resolve(this.orchestrator.config.memoryDir);
+    const namespacesRoot = nodePath.join(memoryRoot, "namespaces");
+    const matches: Array<{ storage: StorageManager; dir: string }> = [];
+    for (const ns of configuredNamespaces) {
+      if (!ns) continue;
+      const candidateStorage = await this.orchestrator.getStorage(ns);
+      const candidateRoot = nodePath.resolve(candidateStorage.dir);
+      if (!isPathInsideStorageRoot(candidateRoot, resolvedPath)) continue;
+      if (
+        candidateRoot === memoryRoot &&
+        isPathInsideStorageRoot(namespacesRoot, resolvedPath)
+      ) {
+        continue;
+      }
+      matches.push({ storage: candidateStorage, dir: candidateRoot });
+    }
+
+    matches.sort((a, b) => b.dir.length - a.dir.length);
+    return matches[0] ?? null;
   }
 
   /**
