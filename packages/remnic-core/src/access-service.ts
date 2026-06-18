@@ -57,6 +57,7 @@ import { canReadNamespace, canWriteNamespace, defaultNamespaceForPrincipal, reca
 import { namespaceIdentityFromToken } from "./namespaces/identity.js";
 import { namespaceCollectionName } from "./namespaces/search.js";
 import { SecureStoreLockedError } from "./secure-store/index.js";
+import { isPathInsideStorageRoot } from "./storage-paths.js";
 import type { LastRecallSnapshot } from "./recall-state.js";
 import type {
   GraphRecallSnapshot,
@@ -191,17 +192,24 @@ function qmdResultPathCandidates(
   resultPath: string,
 ): string[] {
   const candidates = new Set<string>();
+  const storageRoot = nodePath.resolve(storageDir);
+  const addCandidate = (candidate: string) => {
+    const resolved = nodePath.resolve(candidate);
+    if (isPathInsideStorageRoot(storageRoot, resolved)) {
+      candidates.add(resolved);
+    }
+  };
   const addRelativeCandidates = (relativePath: string) => {
     const normalized = relativePath.replace(/\\/g, "/").replace(/^\/+/, "");
     if (!normalized) return;
-    candidates.add(nodePath.join(storageDir, normalized));
+    addCandidate(nodePath.join(storageRoot, normalized));
     if (/^\d{4}-\d{2}-\d{2}\//.test(normalized)) {
-      candidates.add(nodePath.join(storageDir, "facts", normalized));
+      addCandidate(nodePath.join(storageRoot, "facts", normalized));
     }
   };
 
   if (nodePath.isAbsolute(resultPath)) {
-    candidates.add(resultPath);
+    addCandidate(resultPath);
   } else {
     addRelativeCandidates(resultPath);
   }

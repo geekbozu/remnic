@@ -153,6 +153,7 @@ import {
 import { CODEX_THREAD_KEY_PREFIX } from "./codex-thread-key.js";
 import { isDisagreementPrompt } from "./signal.js";
 import { lintWorkspaceFiles, rotateMarkdownFileToArchive } from "./hygiene.js";
+import { isPathInsideStorageRoot } from "./storage-paths.js";
 import { EmbeddingFallback } from "./embedding-fallback.js";
 import {
   decideSemanticDedup,
@@ -735,17 +736,24 @@ function qmdResultPathCandidates(
   resultPath: string,
 ): string[] {
   const candidates = new Set<string>();
+  const storageRoot = path.resolve(storageDir);
+  const addCandidate = (candidate: string) => {
+    const resolved = path.resolve(candidate);
+    if (isPathInsideStorageRoot(storageRoot, resolved)) {
+      candidates.add(resolved);
+    }
+  };
   const addRelativeCandidates = (relativePath: string) => {
     const normalized = relativePath.replace(/\\/g, "/").replace(/^\/+/, "");
     if (!normalized) return;
-    candidates.add(path.join(storageDir, normalized));
+    addCandidate(path.join(storageRoot, normalized));
     if (/^\d{4}-\d{2}-\d{2}\//.test(normalized)) {
-      candidates.add(path.join(storageDir, "facts", normalized));
+      addCandidate(path.join(storageRoot, "facts", normalized));
     }
   };
 
   if (path.isAbsolute(resultPath)) {
-    candidates.add(resultPath);
+    addCandidate(resultPath);
   } else {
     addRelativeCandidates(resultPath);
   }

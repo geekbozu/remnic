@@ -397,6 +397,51 @@ test("invalid QMD collection prefixes do not strip into default storage", async 
   assert.strictEqual(result[0].explain?.reinforcementBoost, undefined);
 });
 
+test("namespace collection traversal paths do not escape storage root", async () => {
+  const memoryDir = await makeTmpDir("engram-reinforce-qmd-traversal-");
+  const namespace = "team";
+  const defaultDayDir = path.join(memoryDir, "facts", "2026-06-16");
+  await mkdir(defaultDayDir, { recursive: true });
+  await writeMemory(defaultDayDir, "fact-traversal", {
+    reinforcement_count: 9,
+  });
+
+  const orchestrator = await makeOrchestrator(memoryDir, {
+    namespacesEnabled: true,
+    defaultNamespace: "default",
+    sharedNamespace: "shared",
+    namespacePolicies: [
+      {
+        name: namespace,
+        readPrincipals: ["reader"],
+        writePrincipals: ["writer"],
+      },
+    ],
+    qmdCollection: "openclaw-engram",
+    reinforcementRecallBoostEnabled: true,
+    reinforcementRecallBoostWeight: 0.1,
+    reinforcementRecallBoostMax: 1.0,
+  });
+  (orchestrator as any).initPromise = null;
+
+  const collection = `openclaw-engram--${namespaceIdentityToken(namespace)}`;
+  const result = await (orchestrator as any).boostSearchResults(
+    [
+      {
+        docid: "fact-traversal",
+        path: `${collection}/../../facts/2026-06-16/fact-traversal.md`,
+        snippet: "traversal hit",
+        score: 0.5,
+      },
+    ],
+    ["default", namespace],
+  );
+
+  assert.equal(result.length, 1);
+  assert.strictEqual(result[0].score, 0.5);
+  assert.strictEqual(result[0].explain?.reinforcementBoost, undefined);
+});
+
 test("date-relative QMD misses do not fall back to storage root basename", async () => {
   const memoryDir = await makeTmpDir("engram-reinforce-qmd-date-miss-");
   await writeMemory(memoryDir, "fact-001", {
