@@ -1014,3 +1014,58 @@ test("recallInternal skips embedding fallback after assembly budget expires", as
   assert.equal(embeddingCalls, 0);
   assert.doesNotMatch(context, /late embedding memory/);
 });
+
+test("recallInternal skips no-QMD hot fallback after assembly budget expires", async () => {
+  clearQmdRecallCache();
+  const orchestrator = await makeOrchestrator(
+    "engram-recall-no-qmd-fallback-deadline-",
+    {
+      qmdEnabled: true,
+      embeddingFallbackEnabled: true,
+      memoryBoxesEnabled: true,
+      boxRecallDays: 1,
+      recallEnrichmentDeadlineMs: 5,
+      queryAwareIndexingEnabled: false,
+      parallelRetrievalEnabled: false,
+    },
+  );
+
+  (orchestrator as any).boxBuilderFor = () => ({
+    readRecentBoxes: async () => {
+      await new Promise<never>(() => {});
+      return [];
+    },
+  });
+  (orchestrator as any).qmd = {
+    isAvailable: () => false,
+    probe: async () => false,
+    debugStatus: () => "qmd unavailable",
+  };
+  let embeddingCalls = 0;
+  (orchestrator as any).searchEmbeddingFallback = async () => {
+    embeddingCalls += 1;
+    return [
+      {
+        docid: "late-no-qmd-embedding",
+        path: "facts/2026-03-11/late-no-qmd-embedding.md",
+        snippet: "late no-qmd embedding memory",
+        score: 0.9,
+      },
+    ];
+  };
+  let recentScanReads = 0;
+  (orchestrator as any).readAllMemoriesForNamespaces = async () => {
+    recentScanReads += 1;
+    return [];
+  };
+
+  const context = await (orchestrator as any).recallInternal(
+    "Summarize the current project state.",
+    "agent:test:no-qmd-fallback-deadline",
+    { mode: "full" },
+  );
+
+  assert.equal(embeddingCalls, 0);
+  assert.equal(recentScanReads, 0);
+  assert.doesNotMatch(context, /late no-qmd embedding memory/);
+});

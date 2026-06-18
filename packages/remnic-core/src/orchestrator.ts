@@ -10167,42 +10167,48 @@ export class Orchestrator {
       // Fallback: embeddings first, then recency-only.
       const queryAwarePrefilter = await queryAwarePrefilterPromise;
       if (queryAwarePrefilter.candidatePaths?.size !== 0) {
-      const embeddingResults = await this.searchEmbeddingFallback(
-        retrievalQuery,
-        embeddingFetchLimit,
-      );
-      const prefilteredEmbeddingResults = applyQueryAwareCandidateFilter(
-        embeddingResults,
-        queryAwarePrefilter.candidatePaths,
-      );
-      const scopedCandidates = filterRecallCandidates(
-        prefilteredEmbeddingResults,
-        {
-          namespacesEnabled: this.config.namespacesEnabled,
-          recallNamespaces,
-          resolveNamespace: (p) => this.namespaceFromPath(p),
-          limit: embeddingFetchLimit,
-        },
-      );
-      const boostedScoped = await this.boostSearchResults(
-        scopedCandidates,
-        recallNamespaces,
-        retrievalQuery,
-        undefined,
-        { asOfMs },
-      );
-      // MMR runs on the pre-truncation pool so diverse candidates just
-      // below the cutoff can be promoted into the injected set.
-      xrayBranchPoolSize.hot_embedding = Math.max(
-        xrayBranchPoolSize.hot_embedding,
-        boostedScoped.length,
-      );
-      const scoped = this.diversifyAndLimitRecallResults(
-        "memories",
-        boostedScoped,
-        recallResultLimit,
-        retrievalQuery,
-      );
+        const scoped = await awaitAssemblyStep(
+          "embedding-fallback",
+          async () => {
+            const embeddingResults = await this.searchEmbeddingFallback(
+              retrievalQuery,
+              embeddingFetchLimit,
+            );
+            const prefilteredEmbeddingResults = applyQueryAwareCandidateFilter(
+              embeddingResults,
+              queryAwarePrefilter.candidatePaths,
+            );
+            const scopedCandidates = filterRecallCandidates(
+              prefilteredEmbeddingResults,
+              {
+                namespacesEnabled: this.config.namespacesEnabled,
+                recallNamespaces,
+                resolveNamespace: (p) => this.namespaceFromPath(p),
+                limit: embeddingFetchLimit,
+              },
+            );
+            const boostedScoped = await this.boostSearchResults(
+              scopedCandidates,
+              recallNamespaces,
+              retrievalQuery,
+              undefined,
+              { asOfMs },
+            );
+            // MMR runs on the pre-truncation pool so diverse candidates just
+            // below the cutoff can be promoted into the injected set.
+            xrayBranchPoolSize.hot_embedding = Math.max(
+              xrayBranchPoolSize.hot_embedding,
+              boostedScoped.length,
+            );
+            return this.diversifyAndLimitRecallResults(
+              "memories",
+              boostedScoped,
+              recallResultLimit,
+              retrievalQuery,
+            );
+          },
+          [] as QmdSearchResult[],
+        );
       if (scoped.length > 0) {
         if (shouldPersistGraphSnapshot) {
           graphSnapshotFinalResults = this.buildGraphRecallRankedResults(
@@ -10231,8 +10237,11 @@ export class Orchestrator {
         xrayRecalledResults = scoped;
         impressionRecorded = true;
       } else {
-        const memories =
-          await this.readAllMemoriesForNamespaces(recallNamespaces);
+        const memories = await awaitAssemblyStep(
+          "recent-memory-read",
+          () => this.readAllMemoriesForNamespaces(recallNamespaces),
+          [] as MemoryFile[],
+        );
         if (memories.length > 0) {
           // Filter out non-active memories.  Delegate to
           // shouldFilterSupersededFromRecall for superseded-status logic so
@@ -10331,44 +10340,50 @@ export class Orchestrator {
               impressionRecorded = true;
             }
           } else {
-            const recentSorted = queryAwareScopedMemories.sort(
-              (a, b) =>
-                new Date(b.frontmatter.updated).getTime() -
-                new Date(a.frontmatter.updated).getTime(),
-            );
-            const preloadedMap = new Map<string, MemoryFile>(
-              queryAwareScopedMemories
-                .filter((m) => m.path)
-                .map((m) => [m.path, m]),
-            );
-            const recentAsResults: QmdSearchResult[] = recentSorted.map(
-              (m, i) => ({
-                docid: m.frontmatter.id,
-                path: m.path,
-                snippet: m.content,
-                score: 1.0 - i / Math.max(recentSorted.length, 1),
-              }),
-            );
-            const boostedRecent = (
-              await this.boostSearchResults(
-                recentAsResults,
-                recallNamespaces,
-                retrievalQuery,
-                preloadedMap,
-                { asOfMs },
-              )
-            ).sort((a, b) => b.score - a.score);
-            // MMR runs on the pre-truncation pool so diverse candidates just
-            // below the cutoff can be promoted into the injected set.
-            xrayBranchPoolSize.recent_scan = Math.max(
-              xrayBranchPoolSize.recent_scan,
-              boostedRecent.length,
-            );
-            const recent = this.diversifyAndLimitRecallResults(
-              "memories",
-              boostedRecent,
-              recallResultLimit,
-              retrievalQuery,
+            const recent = await awaitAssemblyStep(
+              "recent-memory-scan",
+              async () => {
+                const recentSorted = queryAwareScopedMemories.sort(
+                  (a, b) =>
+                    new Date(b.frontmatter.updated).getTime() -
+                    new Date(a.frontmatter.updated).getTime(),
+                );
+                const preloadedMap = new Map<string, MemoryFile>(
+                  queryAwareScopedMemories
+                    .filter((m) => m.path)
+                    .map((m) => [m.path, m]),
+                );
+                const recentAsResults: QmdSearchResult[] = recentSorted.map(
+                  (m, i) => ({
+                    docid: m.frontmatter.id,
+                    path: m.path,
+                    snippet: m.content,
+                    score: 1.0 - i / Math.max(recentSorted.length, 1),
+                  }),
+                );
+                const boostedRecent = (
+                  await this.boostSearchResults(
+                    recentAsResults,
+                    recallNamespaces,
+                    retrievalQuery,
+                    preloadedMap,
+                    { asOfMs },
+                  )
+                ).sort((a, b) => b.score - a.score);
+                // MMR runs on the pre-truncation pool so diverse candidates just
+                // below the cutoff can be promoted into the injected set.
+                xrayBranchPoolSize.recent_scan = Math.max(
+                  xrayBranchPoolSize.recent_scan,
+                  boostedRecent.length,
+                );
+                return this.diversifyAndLimitRecallResults(
+                  "memories",
+                  boostedRecent,
+                  recallResultLimit,
+                  retrievalQuery,
+                );
+              },
+              [] as QmdSearchResult[],
             );
 
             if (recent.length > 0) {
