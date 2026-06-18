@@ -15709,35 +15709,78 @@ export class Orchestrator {
     recallNamespaces: readonly string[] = [],
   ): Promise<MemoryFile | null> {
     const parts = qmdCollectionPathParts(resultPath);
-    const fallbackStorageDir =
-      typeof (fallbackStorage as { dir?: unknown }).dir === "string" &&
-      (fallbackStorage as { dir?: string }).dir
-        ? (fallbackStorage as { dir: string }).dir
+    const storageDirFor = (storage: StorageManager): string | null =>
+      typeof (storage as { dir?: unknown }).dir === "string" &&
+      (storage as { dir?: string }).dir
+        ? (storage as { dir: string }).dir
         : null;
+    const fallbackStorageDir = storageDirFor(fallbackStorage);
     const coldCollection = this.config.qmdColdCollection;
     if (parts && parts.collection === coldCollection) {
-      if (!fallbackStorageDir) {
-        return await fallbackStorage.readMemoryByPath(resultPath);
+      const storages: StorageManager[] = [];
+      const seenStorageDirs = new Set<string>();
+      const addStorage = (storage: StorageManager): void => {
+        const storageDir = storageDirFor(storage);
+        const storageKey = storageDir
+          ? path.resolve(storageDir)
+          : `storage-without-dir-${storages.length}`;
+        if (seenStorageDirs.has(storageKey)) return;
+        seenStorageDirs.add(storageKey);
+        storages.push(storage);
+      };
+
+      const fallbackNamespace =
+        fallbackStorageDir !== null
+          ? this.namespaceFromStorageDir(fallbackStorageDir)
+          : this.config.defaultNamespace;
+      if (
+        recallNamespaces.length === 0 ||
+        !this.config.namespacesEnabled ||
+        recallNamespaces.includes(fallbackNamespace)
+      ) {
+        addStorage(fallbackStorage);
       }
-      try {
-        const coldRoot = path.join(fallbackStorageDir, "cold");
-        for (const candidate of qmdResultPathCandidates(
-          coldRoot,
-          parts.relativePath,
-        )) {
-          const memory = await fallbackStorage.readMemoryByPath(candidate);
-          if (memory) return memory;
+
+      if (recallNamespaces.length > 0) {
+        for (const namespace of recallNamespaces) {
+          try {
+            addStorage(await this.storageRouter.storageFor(namespace));
+          } catch (err) {
+            log.debug("qmd cold result namespace storage lookup skipped", {
+              path: resultPath,
+              namespace,
+              error: (err as Error).message,
+            });
+          }
         }
-        return null;
-      } catch (err) {
-        if (err instanceof SecureStoreLockedError) throw err;
-        log.debug("qmd cold result path lookup failed open", {
-          path: resultPath,
-          collection: coldCollection,
-          error: (err as Error).message,
-        });
-        return null;
       }
+
+      for (const storage of storages) {
+        const storageDir = storageDirFor(storage);
+        if (!storageDir) {
+          const memory = await storage.readMemoryByPath(resultPath);
+          if (memory) return memory;
+          continue;
+        }
+        try {
+          const coldRoot = path.join(storageDir, "cold");
+          for (const candidate of qmdResultPathCandidates(
+            coldRoot,
+            parts.relativePath,
+          )) {
+            const memory = await storage.readMemoryByPath(candidate);
+            if (memory) return memory;
+          }
+        } catch (err) {
+          if (err instanceof SecureStoreLockedError) throw err;
+          log.debug("qmd cold result path lookup failed open", {
+            path: resultPath,
+            collection: coldCollection,
+            error: (err as Error).message,
+          });
+        }
+      }
+      return null;
     }
     const collectionNamespace = parts
       ? this.qmdCollectionNamespaceFromPrefix(parts.collection)
@@ -16473,9 +16516,11 @@ export class Orchestrator {
 
     let results = longTerm;
     if (this.config.namespacesEnabled) {
-      results = results.filter((r) =>
-        options.recallNamespaces.includes(this.namespaceFromPath(r.path)),
-      );
+      results = results.filter((r) => {
+        const parts = qmdCollectionPathParts(r.path);
+        if (parts?.collection === coldCollection) return true;
+        return options.recallNamespaces.includes(this.namespaceFromPath(r.path));
+      });
     }
     // Artifact isolation contract: generic recall paths must exclude artifacts.
     results = results.filter((r) => !isArtifactMemoryPath(r.path));

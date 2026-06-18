@@ -402,6 +402,55 @@ test("cold-tier recall reads encrypted cold collection paths through primary sto
   assert.equal(results[0].path, `openclaw-engram-cold/${coldRelativePath}`);
 });
 
+test("cold-tier recall resolves collection-prefixed paths from active recall namespaces", async () => {
+  const memoryDir = await mkdtemp(path.join(os.tmpdir(), "engram-qmd-review-cold-ns-"));
+  const cfg = parseConfig({
+    openaiApiKey: "sk-test",
+    memoryDir,
+    workspaceDir: path.join(memoryDir, "workspace"),
+    namespacesEnabled: true,
+    qmdColdTierEnabled: true,
+    qmdColdCollection: "openclaw-engram-cold",
+  });
+  const orchestrator = new Orchestrator(cfg) as any;
+  const namespaceStorage = await orchestrator.getStorage("project-cold");
+  const memoryId = await namespaceStorage.writeMemory(
+    "fact",
+    "project cold namespace memory",
+  );
+  const memory = await namespaceStorage.getMemoryById(memoryId);
+  assert.ok(memory);
+  const migrated = await namespaceStorage.migrateMemoryToTier(memory, "cold");
+  const coldRelativePath = path
+    .relative(path.join(namespaceStorage.dir, "cold"), migrated.targetPath)
+    .split(path.sep)
+    .join("/");
+
+  orchestrator.qmd = {
+    isAvailable: () => true,
+  };
+  orchestrator.fetchQmdMemoryResultsWithArtifactTopUp = async () => [
+    {
+      docid: memory.frontmatter.id,
+      path: `openclaw-engram-cold/${coldRelativePath}`,
+      snippet: "project cold namespace memory",
+      score: 0.9,
+    },
+  ];
+
+  const results = await orchestrator.applyColdFallbackPipeline({
+    prompt: "review project cold namespace",
+    recallNamespaces: ["project-cold"],
+    recallResultLimit: 2,
+    recallMode: "full",
+    queryAwarePrefilter: EMPTY_PREFILTER,
+  });
+
+  assert.equal(results.length, 1);
+  assert.equal(results[0].docid, memory.frontmatter.id);
+  assert.equal(results[0].path, `openclaw-engram-cold/${coldRelativePath}`);
+});
+
 test("recall safety resolves absolute QMD paths from runtime recall namespaces", async () => {
   const memoryDir = await mkdtemp(path.join(os.tmpdir(), "engram-qmd-review-runtime-ns-"));
   const runtimeDir = await mkdtemp(path.join(os.tmpdir(), "engram-qmd-review-runtime-root-"));
