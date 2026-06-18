@@ -969,3 +969,58 @@ test("cold fallback resolves QMD cold collection-prefixed result paths", async (
   assert.equal(results[0].docid, hotMemory.frontmatter.id);
   assert.equal(results[0].path, coldCollectionPath);
 });
+
+test("recallInternal skips embedding fallback after assembly budget expires", async () => {
+  clearQmdRecallCache();
+  const orchestrator = await makeOrchestrator(
+    "engram-recall-embedding-fallback-deadline-",
+    {
+      qmdEnabled: true,
+      embeddingFallbackEnabled: true,
+      memoryBoxesEnabled: true,
+      boxRecallDays: 1,
+      recallEnrichmentDeadlineMs: 5,
+      queryAwareIndexingEnabled: false,
+      parallelRetrievalEnabled: false,
+    },
+  );
+
+  let releaseBoxes: (() => void) | null = null;
+  (orchestrator as any).boxBuilderFor = () => ({
+    readRecentBoxes: async () => {
+      await new Promise<void>((resolve) => {
+        releaseBoxes = resolve;
+      });
+      return [];
+    },
+  });
+  (orchestrator as any).qmd = {
+    isAvailable: () => true,
+    probe: async () => true,
+    debugStatus: () => "qmd ready",
+  };
+  (orchestrator as any).fetchQmdMemoryResultsWithArtifactTopUp = async () => [];
+  let embeddingCalls = 0;
+  (orchestrator as any).searchEmbeddingFallback = async () => {
+    embeddingCalls += 1;
+    return [
+      {
+        docid: "late-embedding",
+        path: "facts/2026-03-11/late-embedding.md",
+        snippet: "late embedding memory",
+        score: 0.9,
+      },
+    ];
+  };
+
+  setTimeout(() => releaseBoxes?.(), 15);
+
+  const context = await (orchestrator as any).recallInternal(
+    "Summarize the current project state.",
+    "agent:test:embedding-fallback-deadline",
+    { mode: "full" },
+  );
+
+  assert.equal(embeddingCalls, 0);
+  assert.doesNotMatch(context, /late embedding memory/);
+});

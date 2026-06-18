@@ -10013,41 +10013,47 @@ export class Orchestrator {
         // low-relevance results from polluting context.
         const queryAwarePrefilter = await queryAwarePrefilterPromise;
         if (queryAwarePrefilter.candidatePaths?.size !== 0) {
-        const embeddingResults = await this.searchEmbeddingFallback(
-          retrievalQuery,
-          embeddingFetchLimit,
-        );
-        const prefilteredEmbeddingResults = applyQueryAwareCandidateFilter(
-          embeddingResults,
-          queryAwarePrefilter.candidatePaths,
-        );
-        const scopedCandidates = filterRecallCandidates(
-          prefilteredEmbeddingResults,
-          {
-            namespacesEnabled: this.config.namespacesEnabled,
-            recallNamespaces,
-            resolveNamespace: (p) => this.namespaceFromPath(p),
-            limit: embeddingFetchLimit,
+        const scoped = await awaitAssemblyStep(
+          "embedding-fallback",
+          async () => {
+            const embeddingResults = await this.searchEmbeddingFallback(
+              retrievalQuery,
+              embeddingFetchLimit,
+            );
+            const prefilteredEmbeddingResults = applyQueryAwareCandidateFilter(
+              embeddingResults,
+              queryAwarePrefilter.candidatePaths,
+            );
+            const scopedCandidates = filterRecallCandidates(
+              prefilteredEmbeddingResults,
+              {
+                namespacesEnabled: this.config.namespacesEnabled,
+                recallNamespaces,
+                resolveNamespace: (p) => this.namespaceFromPath(p),
+                limit: embeddingFetchLimit,
+              },
+            );
+            const boostedScoped = await this.boostSearchResults(
+              scopedCandidates,
+              recallNamespaces,
+              retrievalQuery,
+              undefined,
+              { asOfMs },
+            );
+            // MMR runs on the pre-truncation pool so diverse candidates just
+            // below the cutoff can be promoted into the injected set.
+            xrayBranchPoolSize.hot_embedding = Math.max(
+              xrayBranchPoolSize.hot_embedding,
+              boostedScoped.length,
+            );
+            return this.diversifyAndLimitRecallResults(
+              "memories",
+              boostedScoped,
+              recallResultLimit,
+              retrievalQuery,
+            );
           },
-        );
-        const boostedScoped = await this.boostSearchResults(
-          scopedCandidates,
-          recallNamespaces,
-          retrievalQuery,
-          undefined,
-          { asOfMs },
-        );
-        // MMR runs on the pre-truncation pool so diverse candidates just
-        // below the cutoff can be promoted into the injected set.
-        xrayBranchPoolSize.hot_embedding = Math.max(
-          xrayBranchPoolSize.hot_embedding,
-          boostedScoped.length,
-        );
-        const scoped = this.diversifyAndLimitRecallResults(
-          "memories",
-          boostedScoped,
-          recallResultLimit,
-          retrievalQuery,
+          [] as QmdSearchResult[],
         );
         if (scoped.length > 0) {
           if (shouldPersistGraphSnapshot) {
