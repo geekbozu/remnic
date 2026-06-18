@@ -519,12 +519,9 @@ test("recallInternal uses already-settled qmd results after the enrichment budge
   const memory = await (orchestrator as any).storage.getMemoryById(memoryId);
   assert.ok(memory);
 
-  let releaseBoxes: (() => void) | null = null;
   (orchestrator as any).boxBuilderFor = () => ({
     readRecentBoxes: async () => {
-      await new Promise<void>((resolve) => {
-        releaseBoxes = resolve;
-      });
+      await new Promise<never>(() => {});
       return [];
     },
   });
@@ -542,8 +539,6 @@ test("recallInternal uses already-settled qmd results after the enrichment budge
       score: 0.91,
     },
   ];
-
-  setTimeout(() => releaseBoxes?.(), 15);
 
   const context = await (orchestrator as any).recallInternal(
     "Summarize the current project state.",
@@ -985,12 +980,9 @@ test("recallInternal skips embedding fallback after assembly budget expires", as
     },
   );
 
-  let releaseBoxes: (() => void) | null = null;
   (orchestrator as any).boxBuilderFor = () => ({
     readRecentBoxes: async () => {
-      await new Promise<void>((resolve) => {
-        releaseBoxes = resolve;
-      });
+      await new Promise<never>(() => {});
       return [];
     },
   });
@@ -1012,8 +1004,6 @@ test("recallInternal skips embedding fallback after assembly budget expires", as
       },
     ];
   };
-
-  setTimeout(() => releaseBoxes?.(), 15);
 
   const context = await (orchestrator as any).recallInternal(
     "Summarize the current project state.",
