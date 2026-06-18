@@ -16516,9 +16516,41 @@ export class Orchestrator {
 
     let results = longTerm;
     if (this.config.namespacesEnabled) {
+      const coldRoots: string[] = [];
+      const seenColdRoots = new Set<string>();
+      for (const namespace of options.recallNamespaces) {
+        try {
+          const storage = await this.storageRouter.storageFor(namespace);
+          const storageDir =
+            typeof (storage as { dir?: unknown }).dir === "string" &&
+            (storage as { dir?: string }).dir
+              ? (storage as { dir: string }).dir
+              : null;
+          if (!storageDir) continue;
+          const coldRoot = path.resolve(storageDir, "cold");
+          if (seenColdRoots.has(coldRoot)) continue;
+          seenColdRoots.add(coldRoot);
+          coldRoots.push(coldRoot);
+        } catch (err) {
+          log.debug("cold-tier recall namespace root lookup skipped", {
+            namespace,
+            error: (err as Error).message,
+          });
+        }
+      }
       results = results.filter((r) => {
         const parts = qmdCollectionPathParts(r.path);
         if (parts?.collection === coldCollection) return true;
+        if (path.isAbsolute(r.path)) {
+          const resolvedPath = path.resolve(r.path);
+          if (
+            coldRoots.some((coldRoot) =>
+              isPathInsideStorageRoot(coldRoot, resolvedPath),
+            )
+          ) {
+            return true;
+          }
+        }
         return options.recallNamespaces.includes(this.namespaceFromPath(r.path));
       });
     }
@@ -16793,31 +16825,42 @@ export class Orchestrator {
       typeof options?.deadlineAtMs === "number" &&
       Date.now() >= options.deadlineAtMs;
 
-    if (!options?.abortSignal && options?.deadlineAtMs == null) {
-      await Promise.all(
-        results.map(async (r) => {
-          if (!r.path) return;
-          if (memoryByPath.has(r.path)) {
-            markChecked(r);
-            return;
-          }
-          try {
-            const mem = await this.readQmdResultMemory(
-              r.path,
-              this.storage,
-              options?.recallNamespaces,
-            );
-            markChecked(r);
-            if (mem) memoryByPath.set(r.path, mem);
-          } catch (err) {
-            if (err instanceof SecureStoreLockedError) {
-              markUnreadable(r, err);
+    if (options?.deadlineAtMs == null) {
+      const batchSize = options?.abortSignal ? 16 : results.length;
+      for (let offset = 0; offset < results.length; offset += batchSize) {
+        if (options?.abortSignal?.aborted) {
+          return {
+            memoryByPath,
+            checkedPaths,
+            unreadablePaths,
+            completed: false,
+          };
+        }
+        await Promise.all(
+          results.slice(offset, offset + batchSize).map(async (r) => {
+            if (!r.path) return;
+            if (memoryByPath.has(r.path)) {
+              markChecked(r);
               return;
             }
-            throw err;
-          }
-        }),
-      );
+            try {
+              const mem = await this.readQmdResultMemory(
+                r.path,
+                this.storage,
+                options?.recallNamespaces,
+              );
+              markChecked(r);
+              if (mem) memoryByPath.set(r.path, mem);
+            } catch (err) {
+              if (err instanceof SecureStoreLockedError) {
+                markUnreadable(r, err);
+                return;
+              }
+              throw err;
+            }
+          }),
+        );
+      }
 
       return { memoryByPath, checkedPaths, unreadablePaths, completed: true };
     }

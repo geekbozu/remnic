@@ -451,6 +451,63 @@ test("cold-tier recall resolves collection-prefixed paths from active recall nam
   assert.equal(results[0].path, `openclaw-engram-cold/${coldRelativePath}`);
 });
 
+test("cold-tier recall resolves absolute cold paths from runtime recall namespaces", async () => {
+  const memoryDir = await mkdtemp(path.join(os.tmpdir(), "engram-qmd-review-cold-abs-ns-"));
+  const runtimeDir = await mkdtemp(path.join(os.tmpdir(), "engram-qmd-review-cold-runtime-"));
+  const cfg = parseConfig({
+    openaiApiKey: "sk-test",
+    memoryDir,
+    workspaceDir: path.join(memoryDir, "workspace"),
+    namespacesEnabled: true,
+    qmdColdTierEnabled: true,
+    qmdColdCollection: "openclaw-engram-cold",
+  });
+  const orchestrator = new Orchestrator(cfg) as any;
+  const StorageManagerCtor = orchestrator.storage.constructor as new (
+    dir: string,
+  ) => typeof orchestrator.storage;
+  const runtimeStorage = new StorageManagerCtor(runtimeDir);
+  const memoryId = await runtimeStorage.writeMemory(
+    "fact",
+    "runtime cold namespace absolute memory",
+  );
+  const memory = await runtimeStorage.getMemoryById(memoryId);
+  assert.ok(memory);
+  const migrated = await runtimeStorage.migrateMemoryToTier(memory, "cold");
+
+  const originalStorageFor = orchestrator.storageRouter.storageFor.bind(
+    orchestrator.storageRouter,
+  );
+  orchestrator.storageRouter.storageFor = async (namespace: string) =>
+    namespace === "runtime-cold"
+      ? runtimeStorage
+      : originalStorageFor(namespace);
+
+  orchestrator.qmd = {
+    isAvailable: () => true,
+  };
+  orchestrator.fetchQmdMemoryResultsWithArtifactTopUp = async () => [
+    {
+      docid: memory.frontmatter.id,
+      path: migrated.targetPath,
+      snippet: "runtime cold namespace absolute memory",
+      score: 0.9,
+    },
+  ];
+
+  const results = await orchestrator.applyColdFallbackPipeline({
+    prompt: "review runtime cold namespace",
+    recallNamespaces: ["runtime-cold"],
+    recallResultLimit: 2,
+    recallMode: "full",
+    queryAwarePrefilter: EMPTY_PREFILTER,
+  });
+
+  assert.equal(results.length, 1);
+  assert.equal(results[0].docid, memory.frontmatter.id);
+  assert.equal(results[0].path, migrated.targetPath);
+});
+
 test("recall safety resolves absolute QMD paths from runtime recall namespaces", async () => {
   const memoryDir = await mkdtemp(path.join(os.tmpdir(), "engram-qmd-review-runtime-ns-"));
   const runtimeDir = await mkdtemp(path.join(os.tmpdir(), "engram-qmd-review-runtime-root-"));
@@ -503,6 +560,50 @@ test("recall safety resolves absolute QMD paths from runtime recall namespaces",
     withRuntimeNamespace.memoryByPath.get(memory.path)?.frontmatter.id,
     memory.frontmatter.id,
   );
+});
+
+test("recall safety keeps signal-only memory reads concurrent", async () => {
+  const memoryDir = await mkdtemp(path.join(os.tmpdir(), "engram-qmd-review-signal-concurrency-"));
+  const cfg = parseConfig({
+    openaiApiKey: "sk-test",
+    memoryDir,
+    workspaceDir: path.join(memoryDir, "workspace"),
+  });
+  const orchestrator = new Orchestrator(cfg) as any;
+  let activeReads = 0;
+  let maxActiveReads = 0;
+  orchestrator.readQmdResultMemory = async (resultPath: string) => {
+    activeReads += 1;
+    maxActiveReads = Math.max(maxActiveReads, activeReads);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    activeReads -= 1;
+    return {
+      path: resultPath,
+      content: "memory",
+      frontmatter: {
+        id: resultPath,
+        category: "fact",
+        created: "2026-03-11T12:00:00.000Z",
+        updated: "2026-03-11T12:00:00.000Z",
+      },
+    };
+  };
+
+  const controller = new AbortController();
+  const loaded = await orchestrator.loadSearchResultMemoryMap(
+    Array.from({ length: 8 }, (_, index) => ({
+      docid: `fact-${index}`,
+      path: `facts/2026-03-11/fact-${index}.md`,
+      snippet: "memory",
+      score: 0.9,
+    })),
+    undefined,
+    { abortSignal: controller.signal },
+  );
+
+  assert.equal(loaded.completed, true);
+  assert.equal(loaded.memoryByPath.size, 8);
+  assert.ok(maxActiveReads > 1);
 });
 
 test("QMD recall snapshot helpers read persisted snapshots and memory_qmd_debug is registered", async () => {
