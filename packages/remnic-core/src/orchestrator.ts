@@ -9549,9 +9549,9 @@ export class Orchestrator {
     }
 
     // 2. QMD results — post-process and format
-    const qmdWasSettledBeforeFormatting =
-      qmdPromise.getSettledOutcome() !== undefined;
     const qmdResult = await awaitEnrichmentSection("qmd", qmdPromise);
+    const qmdWasSettledBeforeSafetyFilter =
+      qmdPromise.getSettledOutcome() !== undefined;
     if (qmdResult) {
       const t0 = Date.now();
       const {
@@ -9720,11 +9720,11 @@ export class Orchestrator {
         undefined,
         {
           asOfMs,
-          // If QMD itself already settled before formatting starts, do not let
-          // an unrelated slow enrichment section turn those known results into
+          // If QMD itself has settled before safety filtering starts, do not
+          // let unrelated slow enrichment turn those known results into
           // unchecked misses. Mandatory safety still runs; optional scoring
           // below remains bounded by awaitAssemblyStep.
-          deadlineAtMs: qmdWasSettledBeforeFormatting
+          deadlineAtMs: qmdWasSettledBeforeSafetyFilter
             ? null
             : enrichmentAssemblyDeadlineAtMs,
           abortSignal: options.abortSignal,

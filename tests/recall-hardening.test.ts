@@ -824,3 +824,68 @@ test("recallInternal shares one enrichment timeout budget across sequential enri
     `expected compounding to share the remaining enrichment budget, saw ${elapsedMs}ms`,
   );
 });
+
+test("recallInternal treats qmd settling during the qmd wait as settled before safety filtering", async () => {
+  clearQmdRecallCache();
+  const orchestrator = await makeOrchestrator(
+    "engram-recall-qmd-settles-during-wait-",
+    {
+      qmdEnabled: true,
+      recallEnrichmentDeadlineMs: 1000,
+    },
+  );
+
+  const memoryId = await (orchestrator as any).storage.writeMemory(
+    "fact",
+    "qmd settled during wait memory",
+  );
+  const memory = await (orchestrator as any).storage.getMemoryById(memoryId);
+  assert.ok(memory);
+
+  const observedSafetyDeadlines: Array<number | null> = [];
+  const originalFilterSearchResultsForRecall =
+    (orchestrator as any).filterSearchResultsForRecall.bind(orchestrator);
+  (orchestrator as any).filterSearchResultsForRecall = async (
+    results: unknown[],
+    preloadedMemoryMap?: unknown,
+    options?: { deadlineAtMs?: number | null },
+  ) => {
+    if (
+      options &&
+      Object.prototype.hasOwnProperty.call(options, "deadlineAtMs")
+    ) {
+      observedSafetyDeadlines.push(options.deadlineAtMs ?? null);
+    }
+    return originalFilterSearchResultsForRecall(
+      results,
+      preloadedMemoryMap,
+      options,
+    );
+  };
+
+  (orchestrator as any).qmd = {
+    isAvailable: () => true,
+    probe: async () => true,
+    debugStatus: () => "qmd ready",
+  };
+  (orchestrator as any).fetchQmdMemoryResultsWithArtifactTopUp = async () => {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    return [
+      {
+        docid: memory.frontmatter.id,
+        path: memory.path,
+        snippet: "qmd settled during wait memory",
+        score: 0.91,
+      },
+    ];
+  };
+
+  const context = await (orchestrator as any).recallInternal(
+    "Summarize the current project state.",
+    "agent:test:qmd-settles-during-wait",
+    { mode: "full" },
+  );
+
+  assert.match(context, /qmd settled during wait memory/);
+  assert.deepEqual(observedSafetyDeadlines, [null]);
+});
