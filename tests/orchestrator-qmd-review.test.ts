@@ -402,6 +402,60 @@ test("cold-tier recall reads encrypted cold collection paths through primary sto
   assert.equal(results[0].path, `openclaw-engram-cold/${coldRelativePath}`);
 });
 
+test("recall safety resolves absolute QMD paths from runtime recall namespaces", async () => {
+  const memoryDir = await mkdtemp(path.join(os.tmpdir(), "engram-qmd-review-runtime-ns-"));
+  const runtimeDir = await mkdtemp(path.join(os.tmpdir(), "engram-qmd-review-runtime-root-"));
+  const cfg = parseConfig({
+    openaiApiKey: "sk-test",
+    memoryDir,
+    workspaceDir: path.join(memoryDir, "workspace"),
+    namespacesEnabled: true,
+  });
+  const orchestrator = new Orchestrator(cfg) as any;
+  const StorageManagerCtor = orchestrator.storage.constructor as new (
+    dir: string,
+  ) => typeof orchestrator.storage;
+  const runtimeStorage = new StorageManagerCtor(runtimeDir);
+  const memoryId = await runtimeStorage.writeMemory(
+    "fact",
+    "runtime namespace absolute QMD memory",
+  );
+  const memory = await runtimeStorage.getMemoryById(memoryId);
+  assert.ok(memory);
+
+  const originalStorageFor = orchestrator.storageRouter.storageFor.bind(
+    orchestrator.storageRouter,
+  );
+  orchestrator.storageRouter.storageFor = async (namespace: string) =>
+    namespace === "runtime-overlay"
+      ? runtimeStorage
+      : originalStorageFor(namespace);
+
+  const result = {
+    docid: memory.frontmatter.id,
+    path: memory.path,
+    snippet: "runtime namespace absolute QMD memory",
+    score: 0.9,
+  };
+  const withoutRuntimeNamespace = await orchestrator.filterSearchResultsForRecall(
+    [result],
+    undefined,
+    { dropUnresolved: true },
+  );
+  assert.equal(withoutRuntimeNamespace.results.length, 0);
+
+  const withRuntimeNamespace = await orchestrator.filterSearchResultsForRecall(
+    [result],
+    undefined,
+    { dropUnresolved: true, recallNamespaces: ["runtime-overlay"] },
+  );
+  assert.equal(withRuntimeNamespace.results.length, 1);
+  assert.equal(
+    withRuntimeNamespace.memoryByPath.get(memory.path)?.frontmatter.id,
+    memory.frontmatter.id,
+  );
+});
+
 test("QMD recall snapshot helpers read persisted snapshots and memory_qmd_debug is registered", async () => {
   const memoryDir = await mkdtemp(path.join(os.tmpdir(), "engram-qmd-debug-"));
   const cfg = parseConfig({

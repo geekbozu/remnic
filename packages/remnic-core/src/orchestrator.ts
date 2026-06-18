@@ -9742,6 +9742,7 @@ export class Orchestrator {
             : enrichmentAssemblyDeadlineAtMs,
           abortSignal: options.abortSignal,
           dropUnresolved: true,
+          recallNamespaces,
         },
       );
 
@@ -15705,6 +15706,7 @@ export class Orchestrator {
   private async readQmdResultMemory(
     resultPath: string,
     fallbackStorage: StorageManager,
+    recallNamespaces: readonly string[] = [],
   ): Promise<MemoryFile | null> {
     const parts = qmdCollectionPathParts(resultPath);
     const fallbackStorageDir =
@@ -15771,6 +15773,7 @@ export class Orchestrator {
       const ownerStorage = await this.storageForAbsoluteQmdResultPath(
         resultPath,
         fallbackStorage,
+        recallNamespaces,
       );
       if (!ownerStorage) return null;
       for (const candidate of qmdResultPathCandidates(
@@ -15799,6 +15802,7 @@ export class Orchestrator {
   private async storageForAbsoluteQmdResultPath(
     resultPath: string,
     fallbackStorage: StorageManager,
+    recallNamespaces: readonly string[] = [],
   ): Promise<{ storage: StorageManager; dir: string } | null> {
     const resolvedPath = path.resolve(resultPath);
     const memoryRoot = path.resolve(this.config.memoryDir);
@@ -15831,6 +15835,9 @@ export class Orchestrator {
     const candidateNamespaces = new Set<string>();
     candidateNamespaces.add(this.config.defaultNamespace);
     candidateNamespaces.add(this.config.sharedNamespace);
+    for (const ns of recallNamespaces) {
+      candidateNamespaces.add(ns);
+    }
     if (isPathInsideStorageRoot(namespacesRoot, resolvedPath)) {
       const relativeToNamespaces = path.relative(namespacesRoot, resolvedPath);
       const [namespaceSegment] = relativeToNamespaces.split(/[\\/]/);
@@ -15932,7 +15939,7 @@ export class Orchestrator {
       if (reader) {
         for (const r of missing) {
           try {
-            const memory = await this.readQmdResultMemory(r.path, reader);
+            const memory = await this.readQmdResultMemory(r.path, reader, namespaces);
             if (!memory) continue;
             const fm = memory.frontmatter;
             if (fm.mw_success === undefined && fm.mw_fail === undefined) continue;
@@ -16504,6 +16511,7 @@ export class Orchestrator {
         deadlineAtMs: options.deadlineAtMs,
         abortSignal: options.abortSignal,
         dropUnresolved: true,
+        recallNamespaces: options.recallNamespaces,
       },
     );
     results = boostInput.results;
@@ -16710,6 +16718,7 @@ export class Orchestrator {
     options?: {
       deadlineAtMs?: number | null;
       abortSignal?: AbortSignal;
+      recallNamespaces?: readonly string[];
     },
   ): Promise<{
     memoryByPath: Map<string, MemoryFile>;
@@ -16748,7 +16757,11 @@ export class Orchestrator {
             return;
           }
           try {
-            const mem = await this.readQmdResultMemory(r.path, this.storage);
+            const mem = await this.readQmdResultMemory(
+              r.path,
+              this.storage,
+              options?.recallNamespaces,
+            );
             markChecked(r);
             if (mem) memoryByPath.set(r.path, mem);
           } catch (err) {
@@ -16774,7 +16787,11 @@ export class Orchestrator {
         return { memoryByPath, checkedPaths, unreadablePaths, completed: false };
       }
       try {
-        const mem = await this.readQmdResultMemory(result.path, this.storage);
+        const mem = await this.readQmdResultMemory(
+          result.path,
+          this.storage,
+          options?.recallNamespaces,
+        );
         markChecked(result);
         if (mem) memoryByPath.set(result.path, mem);
       } catch (err) {
@@ -16913,6 +16930,7 @@ export class Orchestrator {
       deadlineAtMs?: number | null;
       abortSignal?: AbortSignal;
       dropUnresolved?: boolean;
+      recallNamespaces?: readonly string[];
     },
   ): Promise<{ results: QmdSearchResult[]; memoryByPath: Map<string, MemoryFile> }> {
     if (results.length === 0) {
@@ -16979,7 +16997,7 @@ export class Orchestrator {
     const safety = await this.filterSearchResultsForRecall(
       results,
       preloadedMemoryMap,
-      options,
+      { ...options, recallNamespaces: _recallNamespaces },
     );
     const safeResults = safety.results;
     const memoryByPath = safety.memoryByPath;
