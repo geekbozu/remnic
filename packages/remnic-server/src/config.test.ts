@@ -118,6 +118,7 @@ test("server config parser validates and coerces supported fields", () => {
     maxBodyBytes: "2048" as unknown as number,
     adminConsoleEnabled: "false" as unknown as boolean,
     adminConsolePublicDir: "~/remnic-console",
+    adminConsolePrefillToken: "true" as unknown as boolean,
   });
 
   assert.equal(parsed.host, "127.0.0.1");
@@ -127,11 +128,13 @@ test("server config parser validates and coerces supported fields", () => {
   assert.equal(parsed.maxBodyBytes, 2048);
   assert.equal(parsed.adminConsoleEnabled, false);
   assert.equal(parsed.adminConsolePublicDir, "~/remnic-console");
+  assert.equal(parsed.adminConsolePrefillToken, true);
 });
 
 test("server config parser enables the admin console by default", () => {
   assert.equal(parseServerConfig({}).adminConsoleEnabled, true);
   assert.equal(parseServerConfig({ adminConsoleEnabled: false }).adminConsoleEnabled, false);
+  assert.equal(parseServerConfig({}).adminConsolePrefillToken, false);
 });
 
 test("server config parser rejects invalid field types", () => {
@@ -162,5 +165,9 @@ test("server config parser rejects invalid field types", () => {
   assert.throws(
     () => parseServerConfig({ adminConsolePublicDir: 123 as unknown as string }),
     /server\.adminConsolePublicDir: expected a string/,
+  );
+  assert.throws(
+    () => parseServerConfig({ adminConsolePrefillToken: "sometimes" as unknown as boolean }),
+    /server\.adminConsolePrefillToken: expected a boolean/,
   );
 });

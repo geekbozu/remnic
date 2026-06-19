@@ -117,7 +117,9 @@ test("HTTP admin console assets are public but API routes require bearer authent
   try {
     const shell = await fetch(`http://127.0.0.1:${status.port}/remnic/ui/`);
     assert.equal(shell.status, 200);
-    assert.match(await shell.text(), /Remnic Admin Console/);
+    const shellText = await shell.text();
+    assert.match(shellText, /Remnic Admin Console/);
+    assert.doesNotMatch(shellText, /test-token/);
 
     const app = await fetch(`http://127.0.0.1:${status.port}/remnic/ui/app.js`);
     assert.equal(app.status, 200);
@@ -128,6 +130,34 @@ test("HTTP admin console assets are public but API routes require bearer authent
     assert.equal(api.status, 401);
     assert.equal(body.code, "unauthorized");
     assert.equal(api.headers.get("www-authenticate"), "Bearer");
+  } finally {
+    await server.stop();
+  }
+});
+
+test("HTTP admin console can prefill the primary bearer token when explicitly enabled", async () => {
+  const service = {} as EngramAccessService;
+  const server = new EngramAccessHttpServer({
+    service,
+    port: 0,
+    authToken: "test-token",
+    adminConsolePrefillToken: true,
+  });
+
+  const status = await server.start();
+  try {
+    const shell = await fetch(`http://127.0.0.1:${status.port}/engram/ui/`);
+    assert.equal(shell.status, 200);
+    assert.equal(shell.headers.get("cache-control"), "no-store");
+    const shellText = await shell.text();
+    assert.match(
+      shellText,
+      /window\.__REMNIC_ADMIN_CONSOLE_PREFILL_TOKEN__="test-token"/,
+    );
+
+    const app = await fetch(`http://127.0.0.1:${status.port}/engram/ui/app.js`);
+    assert.equal(app.status, 200);
+    assert.doesNotMatch(await app.text(), /test-token/);
   } finally {
     await server.stop();
   }

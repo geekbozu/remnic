@@ -41,6 +41,8 @@ export interface EngramAccessHttpServerOptions {
   maxBodyBytes?: number;
   adminConsoleEnabled?: boolean;
   adminConsolePublicDir?: string;
+  /** Inject the primary auth token into the admin console shell for trusted launch surfaces. */
+  adminConsolePrefillToken?: boolean;
   trustPrincipalHeader?: boolean;
   /** Enable adapter-based identity resolution from request headers */
   enableAdapters?: boolean;
@@ -262,6 +264,7 @@ export class EngramAccessHttpServer {
   private readonly maxBodyBytes: number;
   private readonly adminConsoleEnabled: boolean;
   private readonly adminConsolePublicDir: string;
+  private readonly adminConsolePrefillToken?: string;
   private readonly adminControls?: RemnicAdminControls;
   private readonly trustPrincipalHeader: boolean;
   private readonly adapterRegistry: AdapterRegistry | null;
@@ -295,6 +298,7 @@ export class EngramAccessHttpServer {
       : 131072;
     this.adminConsoleEnabled = options.adminConsoleEnabled !== false;
     this.adminConsolePublicDir = options.adminConsolePublicDir ?? defaultAdminConsolePublicDir;
+    this.adminConsolePrefillToken = options.adminConsolePrefillToken === true ? this.authToken : undefined;
     this.adminControls = options.adminControls;
     this.trustPrincipalHeader = options.trustPrincipalHeader === true;
     this.adapterRegistry = options.enableAdapters !== false
@@ -2330,7 +2334,7 @@ export class EngramAccessHttpServer {
       return true;
     }
     if (pathname === "/remnic/ui/" || pathname === "/engram/ui/") {
-      await this.respondStatic(res, path.join(this.adminConsolePublicDir, "index.html"), "text/html; charset=utf-8");
+      await this.respondAdminConsoleShell(res);
       return true;
     }
     if (pathname === "/remnic/ui/app.js" || pathname === "/engram/ui/app.js") {
@@ -2338,6 +2342,25 @@ export class EngramAccessHttpServer {
       return true;
     }
     return false;
+  }
+
+  private async respondAdminConsoleShell(res: ServerResponse): Promise<void> {
+    try {
+      let body = await readFile(path.join(this.adminConsolePublicDir, "index.html"), "utf-8");
+      if (this.adminConsolePrefillToken) {
+        const script = `<script>window.__REMNIC_ADMIN_CONSOLE_PREFILL_TOKEN__=${JSON.stringify(this.adminConsolePrefillToken)};</script>`;
+        body = body.includes("</head>")
+          ? body.replace("</head>", `${script}</head>`)
+          : `${script}${body}`;
+        res.setHeader("cache-control", "no-store");
+      }
+      res.statusCode = 200;
+      res.setHeader("content-type", "text/html; charset=utf-8");
+      res.setHeader("content-length", String(Buffer.byteLength(body)));
+      res.end(body);
+    } catch {
+      this.respondJson(res, 404, { error: "not_found" });
+    }
   }
 
   private async respondStatic(res: ServerResponse, filePath: string, contentType: string): Promise<void> {

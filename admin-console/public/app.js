@@ -43,6 +43,11 @@ function readToken() {
   return window.sessionStorage.getItem(tokenKey) || "";
 }
 
+function readPrefillToken() {
+  const token = window.__REMNIC_ADMIN_CONSOLE_PREFILL_TOKEN__;
+  return typeof token === "string" ? token.trim() : "";
+}
+
 function writeToken(token) {
   if (token) {
     window.sessionStorage.setItem(tokenKey, token);
@@ -2089,8 +2094,13 @@ function copyMemoryPath() {
 
 function bootstrap() {
   const remembered = readToken();
-  if (remembered && $("tokenInput")) {
-    $("tokenInput").value = remembered;
+  const prefill = readPrefillToken();
+  const token = remembered || prefill;
+  if (token && $("tokenInput")) {
+    $("tokenInput").value = token;
+  }
+  if (!remembered && prefill) {
+    writeToken(prefill);
   }
 
   $("connectButton")?.addEventListener("click", () => void connectAndBootstrap());
@@ -2133,7 +2143,7 @@ function bootstrap() {
   $("refreshRuntimeButton")?.addEventListener("click", () => void loadAdminDashboard());
   $("saveRuntimeConfigButton")?.addEventListener("click", () => void saveRuntimeConfig());
 
-  if (remembered) {
+  if (token) {
     void connectAndBootstrap();
   } else {
     syncBrowserControls();

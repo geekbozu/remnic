@@ -28,6 +28,7 @@ export interface ServerConfig {
     maxBodyBytes?: number;
     adminConsoleEnabled?: boolean;
     adminConsolePublicDir?: string;
+    adminConsolePrefillToken?: boolean;
   };
 }
 
@@ -97,6 +98,7 @@ export interface ParsedServerConfig {
   maxBodyBytes?: number;
   adminConsoleEnabled: boolean;
   adminConsolePublicDir?: string;
+  adminConsolePrefillToken: boolean;
 }
 
 export function parseServerConfig(
@@ -113,6 +115,7 @@ export function parseServerConfig(
     maxBodyBytes: parseOptionalPositiveInteger(raw.maxBodyBytes, "server.maxBodyBytes"),
     adminConsoleEnabled: parseOptionalBoolean(raw.adminConsoleEnabled, "server.adminConsoleEnabled") ?? true,
     adminConsolePublicDir: parseOptionalString(raw.adminConsolePublicDir, "server.adminConsolePublicDir"),
+    adminConsolePrefillToken: parseOptionalBoolean(raw.adminConsolePrefillToken, "server.adminConsolePrefillToken") ?? false,
   };
 }
 
@@ -211,11 +214,13 @@ function envOverrides(): Partial<ServerConfig["server"]> & { remnic?: Record<str
   const authToken = readCompatEnv("REMNIC_AUTH_TOKEN", "ENGRAM_AUTH_TOKEN");
   const adminConsoleEnabled = readCompatEnv("REMNIC_ADMIN_CONSOLE_ENABLED", "ENGRAM_ADMIN_CONSOLE_ENABLED");
   const adminConsolePublicDir = readCompatEnv("REMNIC_ADMIN_CONSOLE_PUBLIC_DIR", "ENGRAM_ADMIN_CONSOLE_PUBLIC_DIR");
+  const adminConsolePrefillToken = readCompatEnv("REMNIC_ADMIN_CONSOLE_PREFILL_TOKEN", "ENGRAM_ADMIN_CONSOLE_PREFILL_TOKEN");
   if (port) overrides.port = port;
   if (host) overrides.host = host;
   if (authToken) overrides.authToken = authToken;
   if (adminConsoleEnabled) overrides.adminConsoleEnabled = adminConsoleEnabled;
   if (adminConsolePublicDir) overrides.adminConsolePublicDir = adminConsolePublicDir;
+  if (adminConsolePrefillToken) overrides.adminConsolePrefillToken = adminConsolePrefillToken;
 
   if (process.env.OPENAI_API_KEY) remnic.openaiApiKey = process.env.OPENAI_API_KEY;
   const memoryDir = readCompatEnv("REMNIC_MEMORY_DIR", "ENGRAM_MEMORY_DIR");
@@ -739,6 +744,7 @@ export async function startServer(options?: {
     adminConsolePublicDir: parsedServerConfig.adminConsolePublicDir
       ? path.resolve(expandTildePath(parsedServerConfig.adminConsolePublicDir))
       : undefined,
+    adminConsolePrefillToken: parsedServerConfig.adminConsolePrefillToken,
     adminControls: createAdminControls(resolvedConfigPath.path, config, parsedServerConfig),
     citationsEnabled: config.citationsEnabled,
     citationsAutoDetect: config.citationsAutoDetect,
@@ -914,6 +920,8 @@ Environment:
   REMNIC_PORT          Server port (ENGRAM_PORT also supported)
   REMNIC_HOST          Bind address (ENGRAM_HOST also supported)
   REMNIC_AUTH_TOKEN    Auth bearer token (ENGRAM_AUTH_TOKEN also supported)
+  REMNIC_ADMIN_CONSOLE_PREFILL_TOKEN
+                       Prefill admin UI with REMNIC_AUTH_TOKEN when true
   REMNIC_MEMORY_DIR    Override memory directory (ENGRAM_MEMORY_DIR also supported)
   OPENAI_API_KEY       OpenAI API key for extraction; ignored when config sets openaiApiKey=false
 `);
