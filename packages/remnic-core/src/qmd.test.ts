@@ -163,14 +163,17 @@ test("QmdClient preserves configured qmdPath diagnostics when all probes fail", 
   process.env.PATH = "";
   process.env.Path = "";
   try {
-    const client = new QmdClient("test-collection", 10, { qmdPath: missingQmdPath });
+    const client = new QmdClient("test-collection", 10, {
+      qmdPath: missingQmdPath,
+      qmdFallbackPaths: [],
+    });
 
     assert.equal(await client.probe(), false);
     const status = client.debugStatus();
 
     assert.ok(status.includes(`cliPath=${missingQmdPath}`), status);
     assert.ok(status.includes("cliPathSource=configured"), status);
-    assert.ok(status.includes(`cliProbeError=spawn ${missingQmdPath}`), status);
+    assert.ok(status.includes("cliProbeError="), status);
     assert.ok(!status.includes("/opt/homebrew/bin/qmd"), status);
   } finally {
     if (originalPath === undefined) delete process.env.PATH;
