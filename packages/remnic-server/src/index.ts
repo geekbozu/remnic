@@ -314,6 +314,37 @@ function canWriteConfigPath(configPath: string): boolean {
   }
 }
 
+function writeConfigFileAtomically(configPath: string, data: Record<string, unknown>): void {
+  fs.mkdirSync(path.dirname(configPath), { recursive: true });
+  const tmpPath = path.join(
+    path.dirname(configPath),
+    `.${path.basename(configPath)}.tmp-${process.pid}-${Date.now()}`,
+  );
+  let completed = false;
+  try {
+    fs.writeFileSync(tmpPath, `${JSON.stringify(data, null, 2)}\n`, {
+      encoding: "utf8",
+      flag: "wx",
+      mode: 0o600,
+    });
+    fs.renameSync(tmpPath, configPath);
+    try {
+      fs.chmodSync(configPath, 0o600);
+    } catch {
+      // Best effort for platforms/filesystems that do not support chmod.
+    }
+    completed = true;
+  } finally {
+    if (!completed) {
+      try {
+        fs.unlinkSync(tmpPath);
+      } catch {
+        // Best effort cleanup for failed writes.
+      }
+    }
+  }
+}
+
 function readJsonRecordIfPresent(configPath: string): Record<string, unknown> {
   if (!fs.existsSync(configPath)) return {};
   const parsed = JSON.parse(fs.readFileSync(configPath, "utf8"));
@@ -624,8 +655,7 @@ function createAdminControls(
           : raw;
       const nextDisplayConfig = parseConfig(candidateRemnic);
 
-      fs.mkdirSync(path.dirname(configPath), { recursive: true });
-      fs.writeFileSync(configPath, `${JSON.stringify(raw, null, 2)}\n`, "utf8");
+      writeConfigFileAtomically(configPath, raw);
       displayConfig = nextDisplayConfig;
       restartRequired = true;
       return status();

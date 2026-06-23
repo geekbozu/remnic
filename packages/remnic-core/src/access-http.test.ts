@@ -146,9 +146,16 @@ test("HTTP admin console can prefill the primary bearer token when explicitly en
 
   const status = await server.start();
   try {
-    const shell = await fetch(`http://127.0.0.1:${status.port}/engram/ui/`);
+    const unauthenticatedShell = await fetch(`http://127.0.0.1:${status.port}/engram/ui/`);
+    assert.equal(unauthenticatedShell.status, 200);
+    assert.doesNotMatch(await unauthenticatedShell.text(), /test-token/);
+
+    const shell = await fetch(`http://127.0.0.1:${status.port}/engram/ui/`, {
+      headers: { authorization: "Bearer test-token" },
+    });
     assert.equal(shell.status, 200);
-    assert.equal(shell.headers.get("cache-control"), "no-store");
+    assert.equal(shell.headers.get("cache-control"), "private, no-store");
+    assert.equal(shell.headers.get("vary"), "authorization");
     const shellText = await shell.text();
     assert.match(
       shellText,

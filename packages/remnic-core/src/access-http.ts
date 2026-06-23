@@ -2334,7 +2334,7 @@ export class EngramAccessHttpServer {
       return true;
     }
     if (pathname === "/remnic/ui/" || pathname === "/engram/ui/") {
-      await this.respondAdminConsoleShell(res);
+      await this.respondAdminConsoleShell(req, res, pathname);
       return true;
     }
     if (pathname === "/remnic/ui/app.js" || pathname === "/engram/ui/app.js") {
@@ -2344,16 +2344,22 @@ export class EngramAccessHttpServer {
     return false;
   }
 
-  private async respondAdminConsoleShell(res: ServerResponse): Promise<void> {
+  private async respondAdminConsoleShell(
+    req: IncomingMessage,
+    res: ServerResponse,
+    pathname: string,
+  ): Promise<void> {
     try {
       let body = await readFile(path.join(this.adminConsolePublicDir, "index.html"), "utf-8");
-      if (this.adminConsolePrefillToken) {
+      const canPrefillToken = this.adminConsolePrefillToken && this.isAuthorized(req, pathname);
+      if (canPrefillToken) {
         const script = `<script>window.__REMNIC_ADMIN_CONSOLE_PREFILL_TOKEN__=${JSON.stringify(this.adminConsolePrefillToken)};</script>`;
         body = body.includes("</head>")
           ? body.replace("</head>", `${script}</head>`)
           : `${script}${body}`;
-        res.setHeader("cache-control", "no-store");
+        res.setHeader("cache-control", "private, no-store");
       }
+      res.setHeader("vary", "authorization");
       res.statusCode = 200;
       res.setHeader("content-type", "text/html; charset=utf-8");
       res.setHeader("content-length", String(Buffer.byteLength(body)));

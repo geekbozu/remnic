@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import path from "node:path";
 import os from "node:os";
 import net from "node:net";
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { Orchestrator } from "@remnic/core";
 import { cliMain, startServer } from "../packages/remnic-server/src/index.js";
 import { runServerBin } from "../packages/remnic-server/bin/server-bin.js";
@@ -324,6 +324,69 @@ test("startServer rejects invalid config file ports before initializing", async 
     () => startServer({ configPath }),
     /Invalid server\.port: expected an integer port from 1 to 65535/,
   );
+});
+
+test("admin config PATCH writes config atomically with owner-only permissions", async (t) => {
+  restoreEnv(t, [
+    "REMNIC_PORT",
+    "ENGRAM_PORT",
+    "REMNIC_MEMORY_DIR",
+    "ENGRAM_MEMORY_DIR",
+    "REMNIC_AUTH_TOKEN",
+    "ENGRAM_AUTH_TOKEN",
+  ]);
+  delete process.env.REMNIC_PORT;
+  delete process.env.ENGRAM_PORT;
+  delete process.env.REMNIC_MEMORY_DIR;
+  delete process.env.ENGRAM_MEMORY_DIR;
+  delete process.env.REMNIC_AUTH_TOKEN;
+  delete process.env.ENGRAM_AUTH_TOKEN;
+
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "remnic-server-admin-config-"));
+  t.after(() => rm(tempDir, { recursive: true, force: true }));
+  const memoryDir = path.join(tempDir, "memory");
+  const configPath = path.join(tempDir, "remnic.config.json");
+  const port = await getFreePort();
+  await writeFile(
+    configPath,
+    JSON.stringify({
+      remnic: {
+        memoryDir,
+        openaiApiKey: false,
+        qmdEnabled: false,
+        qmdDaemonEnabled: false,
+        searchBackend: "noop",
+      },
+      server: { authToken: "test-token" },
+    }),
+    "utf8",
+  );
+  await chmod(configPath, 0o644);
+
+  const result = await startServer({ configPath, port });
+  try {
+    const response = await fetch(`http://127.0.0.1:${port}/engram/v1/admin/config`, {
+      method: "PATCH",
+      headers: {
+        authorization: "Bearer test-token",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ localLlmEnabled: true }),
+    });
+    assert.equal(response.status, 200);
+    const body = await response.json() as { config?: { restartRequired?: boolean } };
+    assert.equal(body.config?.restartRequired, true);
+
+    const persisted = JSON.parse(await readFile(configPath, "utf8")) as {
+      remnic?: { localLlmEnabled?: boolean };
+    };
+    assert.equal(persisted.remnic?.localLlmEnabled, true);
+    assert.equal((await stat(configPath)).mode & 0o777, 0o600);
+    const leftovers = (await readdir(tempDir)).filter((entry) => entry.includes(".tmp-"));
+    assert.deepEqual(leftovers, []);
+  } finally {
+    await result.stop();
+  }
 });
 
 test("startServer destroys the orchestrator when HTTP bind fails after initialization", async (t) => {
