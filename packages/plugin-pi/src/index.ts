@@ -48,6 +48,9 @@ type PiContextSnapshot = {
   setStatus: (key: string, value: string) => void;
   compact?: () => unknown;
 };
+type PiContextSnapshotOptions = {
+  includeSessionHistory?: boolean;
+};
 
 export function createRemnicPiExtension(options: RemnicPiExtensionOptions = {}) {
   const config = options.config ?? loadConfig(options);
@@ -56,7 +59,7 @@ export function createRemnicPiExtension(options: RemnicPiExtensionOptions = {}) 
 
   return async function remnicPiExtension(pi: PiApi): Promise<void> {
     pi.on("session_start", async (_event, ctx) => {
-      const session = snapshotPiContext(ctx);
+      const session = snapshotPiContext(ctx, { includeSessionHistory: true });
       const { state } = getSessionState(session.sessionKey, sessionStates);
       restoreObservedState(session, state.observedHashes);
       if (!config.statusEnabled) return;
@@ -109,7 +112,7 @@ export function createRemnicPiExtension(options: RemnicPiExtensionOptions = {}) 
     });
 
     pi.on("session_shutdown", async (_event, ctx) => {
-      const session = snapshotPiContext(ctx);
+      const session = snapshotPiContext(ctx, { includeSessionHistory: true });
       const { sessionKey, state } = getSessionState(session.sessionKey, sessionStates);
       if (config.observeEnabled) {
         const branchMessages = branchMessagesWithEntryIdentity(session.branch);
@@ -534,17 +537,18 @@ async function setStatus(session: PiContextSnapshot, client: RemnicClient, confi
   }
 }
 
-function snapshotPiContext(ctx: any): PiContextSnapshot {
+function snapshotPiContext(ctx: any, options: PiContextSnapshotOptions = {}): PiContextSnapshot {
   const sessionKey = safeSessionKeyFromContext(ctx);
   const cwd = safeStringRead(() => ctx?.cwd, "");
   const hasUI = safeRead(() => ctx?.hasUI, undefined) === false;
   const ui = hasUI ? undefined : safeRead(() => ctx?.ui, undefined);
   const compact = safeRead(() => ctx?.compact, undefined);
+  const includeSessionHistory = options.includeSessionHistory === true;
   return {
     sessionKey,
     cwd,
-    entries: safeEntries(ctx),
-    branch: safeBranch(ctx),
+    entries: includeSessionHistory ? safeEntries(ctx) : [],
+    branch: includeSessionHistory ? safeBranch(ctx) : [],
     notify: makeNotifier(ui, hasUI),
     setStatus: makeStatusSetter(ui, hasUI),
     compact: typeof compact === "function" ? () => compact.call(ctx) : undefined,

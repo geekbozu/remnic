@@ -809,6 +809,45 @@ test("context recall appends injected context after stable conversation history"
   assert.equal(result.messages?.[2]?.remnicInjected, true);
 });
 
+test("context recall does not load full session history", async (t) => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () =>
+    new Response(JSON.stringify({ context: "remembered context" }), { status: 200 });
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const { pi, emit } = makePiHarness();
+  const extension = createRemnicPiExtension({
+    config: {
+      ...baseConfig(),
+      authToken: "test-token",
+      observeEnabled: false,
+      compactionEnabled: false,
+      mcpToolsEnabled: false,
+      statusEnabled: false,
+    },
+  });
+  await extension(pi as any);
+
+  const sessionManager = {
+    getSessionId: () => "history-free-context",
+    getEntries: () => {
+      throw new Error("getEntries should not be called");
+    },
+    getBranch: () => {
+      throw new Error("getBranch should not be called");
+    },
+  };
+
+  const result = await emit("context", { messages: [{ role: "user", content: "same prompt" }] }, {
+    cwd: "/tmp/remnic-pi",
+    sessionManager,
+  }) as { messages?: Array<Record<string, unknown>> };
+
+  assert.equal(result.messages?.at(-1)?.remnicInjected, true);
+});
+
 test("recall context truncation stays within the configured budget", async (t) => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async () =>
