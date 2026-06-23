@@ -3780,9 +3780,9 @@ const pluginDefinition = {
           reserveTokensFloor: 2_000,
           ...(flushModel ? { model: flushModel } : {}),
           prompt:
-            "Flush the recent OpenClaw transcript into Remnic memory. Preserve durable user preferences, project facts, decisions, corrections, and commitments. Ignore runtime metadata, credentials, and transient command noise.",
+            "Flush the recent OpenClaw transcript into Remnic memory by appending to the allowed flush-plan file only. Preserve durable user preferences, project facts, decisions, corrections, and commitments. Ignore runtime metadata, credentials, and transient command noise.",
           systemPrompt:
-            "You are Remnic's memory flush planner. Produce concise durable memory candidates only when the transcript contains information worth remembering.",
+            "You are Remnic's memory flush planner. Read the transcript and append concise durable memory notes to the file the write tool allows. Do not create files, directories, or dated paths; use only the allowed flush-plan file. Ignore runtime metadata, credentials, transient command noise, and content that is not worth remembering.",
           relativePath: ["state", "plugins", serviceId, "flush-plan.md"].join("/"),
         };
       };
