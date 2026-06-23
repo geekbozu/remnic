@@ -113,7 +113,7 @@ export function parseServerConfig(
     authToken: parseOptionalString(raw.authToken, "server.authToken"),
     principal: parseOptionalString(raw.principal, "server.principal"),
     maxBodyBytes: parseOptionalPositiveInteger(raw.maxBodyBytes, "server.maxBodyBytes"),
-    adminConsoleEnabled: parseOptionalBoolean(raw.adminConsoleEnabled, "server.adminConsoleEnabled") ?? true,
+    adminConsoleEnabled: parseOptionalBoolean(raw.adminConsoleEnabled, "server.adminConsoleEnabled") ?? false,
     adminConsolePublicDir: parseOptionalString(raw.adminConsolePublicDir, "server.adminConsolePublicDir"),
     adminConsolePrefillToken: parseOptionalBoolean(raw.adminConsolePrefillToken, "server.adminConsolePrefillToken") ?? false,
   };
@@ -357,10 +357,6 @@ function readJsonRecordIfPresent(configPath: string): Record<string, unknown> {
 function resolveEditableRemnicBlock(root: Record<string, unknown>): Record<string, unknown> {
   if (isPlainRecord(root.remnic)) return root.remnic;
   if (isPlainRecord(root.engram)) return root.engram;
-  if (root.server !== undefined) {
-    root.remnic = {};
-    return root.remnic as Record<string, unknown>;
-  }
   return root;
 }
 

@@ -131,8 +131,9 @@ test("server config parser validates and coerces supported fields", () => {
   assert.equal(parsed.adminConsolePrefillToken, true);
 });
 
-test("server config parser enables the admin console by default", () => {
-  assert.equal(parseServerConfig({}).adminConsoleEnabled, true);
+test("server config parser disables the admin console by default", () => {
+  assert.equal(parseServerConfig({}).adminConsoleEnabled, false);
+  assert.equal(parseServerConfig({ adminConsoleEnabled: true }).adminConsoleEnabled, true);
   assert.equal(parseServerConfig({ adminConsoleEnabled: false }).adminConsoleEnabled, false);
   assert.equal(parseServerConfig({}).adminConsolePrefillToken, false);
 });

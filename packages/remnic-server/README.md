@@ -40,8 +40,10 @@ docker run --rm \
   ghcr.io/joshuaswarren/remnic:latest
 ```
 
-The image stores memory and runtime configuration under `/data`. The admin
-console is enabled by default and is available at `/engram/ui/`.
+The image stores memory and runtime configuration under `/data`. The container
+enables the admin console explicitly and serves it at `/engram/ui/`. Package
+installs keep the console disabled unless `server.adminConsoleEnabled` or
+`REMNIC_ADMIN_CONSOLE_ENABLED=true` is set with a public asset directory.
 
 The package also ships the legacy `engram-server` binary for compatibility.
 The bin wrappers are source-controlled so package managers can link them during

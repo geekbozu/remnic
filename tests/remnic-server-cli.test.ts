@@ -389,6 +389,73 @@ test("admin config PATCH writes config atomically with owner-only permissions", 
   }
 });
 
+test("admin config PATCH preserves flat remnic config files that also have server settings", async (t) => {
+  restoreEnv(t, [
+    "REMNIC_PORT",
+    "ENGRAM_PORT",
+    "REMNIC_MEMORY_DIR",
+    "ENGRAM_MEMORY_DIR",
+    "REMNIC_AUTH_TOKEN",
+    "ENGRAM_AUTH_TOKEN",
+  ]);
+  delete process.env.REMNIC_PORT;
+  delete process.env.ENGRAM_PORT;
+  delete process.env.REMNIC_MEMORY_DIR;
+  delete process.env.ENGRAM_MEMORY_DIR;
+  delete process.env.REMNIC_AUTH_TOKEN;
+  delete process.env.ENGRAM_AUTH_TOKEN;
+
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "remnic-server-admin-flat-config-"));
+  t.after(() => rm(tempDir, { recursive: true, force: true }));
+  const memoryDir = path.join(tempDir, "memory");
+  const configPath = path.join(tempDir, "remnic.config.json");
+  const port = await getFreePort();
+  await writeFile(
+    configPath,
+    JSON.stringify({
+      memoryDir,
+      openaiApiKey: false,
+      qmdEnabled: false,
+      qmdDaemonEnabled: false,
+      searchBackend: "noop",
+      server: { authToken: "test-token" },
+    }),
+    "utf8",
+  );
+
+  const result = await startServer({ configPath, port });
+  try {
+    const response = await fetch(`http://127.0.0.1:${port}/engram/v1/admin/config`, {
+      method: "PATCH",
+      headers: {
+        authorization: "Bearer test-token",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ localLlmEnabled: true }),
+    });
+    assert.equal(response.status, 200);
+
+    const persisted = JSON.parse(await readFile(configPath, "utf8")) as {
+      remnic?: unknown;
+      memoryDir?: string;
+      openaiApiKey?: unknown;
+      qmdEnabled?: boolean;
+      qmdDaemonEnabled?: boolean;
+      searchBackend?: string;
+      localLlmEnabled?: boolean;
+    };
+    assert.equal(persisted.remnic, undefined);
+    assert.equal(persisted.memoryDir, memoryDir);
+    assert.equal(persisted.openaiApiKey, false);
+    assert.equal(persisted.qmdEnabled, false);
+    assert.equal(persisted.qmdDaemonEnabled, false);
+    assert.equal(persisted.searchBackend, "noop");
+    assert.equal(persisted.localLlmEnabled, true);
+  } finally {
+    await result.stop();
+  }
+});
+
 test("startServer destroys the orchestrator when HTTP bind fails after initialization", async (t) => {
   restoreEnv(t, [
     "REMNIC_PORT",
