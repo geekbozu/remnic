@@ -662,3 +662,84 @@ describe("Integration: corrupt JSONL fail-open", () => {
     }
   });
 });
+
+describe("GraphIndex.spreadingActivation — assembly deadlines", () => {
+  const cfg = {
+    multiGraphMemoryEnabled: true,
+    entityGraphEnabled: true,
+    timeGraphEnabled: true,
+    causalGraphEnabled: false,
+    maxGraphTraversalSteps: 3,
+    graphActivationDecay: 0.7,
+    maxEntityGraphEdgesPerMemory: 10,
+  } as unknown as GraphConfig;
+
+  it("returns [] immediately when the traversal deadline is already expired", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "engram-sa-deadline-"));
+    try {
+      const gi = new GraphIndex(dir, cfg);
+      await appendEdge(dir, {
+        from: "A.md",
+        to: "B.md",
+        type: "entity",
+        weight: 1.0,
+        label: "deadline",
+        ts: new Date().toISOString(),
+      });
+      let edgeCacheLoaded = false;
+      (gi as unknown as { loadEdgesCached(): Promise<unknown[]> }).loadEdgesCached =
+        async () => {
+          edgeCacheLoaded = true;
+          return [];
+        };
+      const startedAt = Date.now();
+      const results = await gi.spreadingActivation(["A.md"], 3, {
+        deadlineAtMs: startedAt - 1,
+      });
+      assert.deepEqual(results, []);
+      assert.equal(edgeCacheLoaded, false);
+      assert.ok(Date.now() - startedAt < 100, "expired deadline should fail open quickly");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps completed BFS results when the deadline expires before inhibition", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "engram-sa-deadline-partial-"));
+    const originalNow = Date.now;
+    try {
+      const gi = new GraphIndex(dir, {
+        ...cfg,
+        graphTraversalPageRankIterations: 0,
+        graphLateralInhibitionEnabled: true,
+      } as unknown as GraphConfig);
+      await appendEdge(dir, {
+        from: "A.md",
+        to: "B.md",
+        type: "entity",
+        weight: 1.0,
+        label: "deadline",
+        ts: new Date().toISOString(),
+      });
+
+      let calls = 0;
+      Date.now = () => {
+        calls += 1;
+        return calls < 7 ? 1_000 : 2_000;
+      };
+
+      const results = await gi.spreadingActivation(["A.md"], 1, {
+        deadlineAtMs: 1_500,
+      });
+      assert.equal(results.length, 1);
+      assert.equal(results[0].path, "B.md");
+      assert.ok(
+        Math.abs(results[0].score - 0.7) < 0.001,
+        `expected BFS score 0.7 got ${results[0].score}`,
+      );
+    } finally {
+      Date.now = originalNow;
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});

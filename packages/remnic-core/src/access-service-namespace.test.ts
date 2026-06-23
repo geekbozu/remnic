@@ -6,7 +6,9 @@ import path from "node:path";
 import test from "node:test";
 
 import { EngramAccessInputError, EngramAccessService } from "./access-service.js";
+import { namespaceIdentityToken } from "./namespaces/identity.js";
 import { namespaceCollectionName } from "./namespaces/search.js";
+import { SecureStoreLockedError } from "./secure-store/index.js";
 import type { StorageManager } from "./storage.js";
 import type { PluginConfig } from "./types.js";
 
@@ -148,6 +150,744 @@ test("memoryBrowse resolves namespace storage for read principals", async () => 
   assert.equal(result.namespace, "team");
   assert.equal(result.count, 0);
   assert.deepEqual(getStorageCalls, ["team"]);
+});
+
+test("last recall serialization resolves namespace collection-prefixed result paths", async () => {
+  const service = Object.create(EngramAccessService.prototype) as EngramAccessService;
+  const memoryRoot = await mkdtemp(path.join(os.tmpdir(), "remnic-access-qmd-ns-"));
+  const teamDir = path.join(
+    memoryRoot,
+    "namespaces",
+    namespaceIdentityToken("team"),
+  );
+  const memoryPath = path.join(
+    teamDir,
+    "archive",
+    "facts",
+    "2026-06-16",
+    "fact-001.md",
+  );
+  const teamMemory = {
+    path: memoryPath,
+    frontmatter: {
+      id: "fact-001",
+      created: "2026-06-16T12:00:00.000Z",
+      updated: "2026-06-16T12:00:00.000Z",
+      category: "fact",
+      status: "active",
+      tags: ["discord"],
+    },
+    content: "Agent-authored status update from the channel.",
+  };
+  const readCalls: Array<{ namespace: string; path: string }> = [];
+  const storages: Record<string, StorageManager> = {
+    default: {
+      dir: memoryRoot,
+      async readMemoryByPath(filePath: string) {
+        readCalls.push({ namespace: "default", path: filePath });
+        return null;
+      },
+      async getMemoryById() {
+        return null;
+      },
+    } as unknown as StorageManager,
+    team: {
+      dir: teamDir,
+      async readMemoryByPath(filePath: string) {
+        readCalls.push({ namespace: "team", path: filePath });
+        return filePath === memoryPath ? teamMemory : null;
+      },
+      async getMemoryById() {
+        return null;
+      },
+    } as unknown as StorageManager,
+  };
+
+  (service as unknown as {
+    orchestrator: {
+      config: PluginConfig;
+      getStorage(namespace: string): Promise<StorageManager>;
+    };
+  }).orchestrator = {
+    config: makeConfig(),
+    async getStorage(namespace: string) {
+      return storages[namespace] ?? storages.default;
+    },
+  };
+
+  const collection = namespaceCollectionName("test-memory", "team", {
+    defaultNamespace: "default",
+    useLegacyDefaultCollection: false,
+  });
+  const result = await (service as unknown as {
+    serializeRecallResults(
+      snapshot: unknown,
+      disclosure: "summary",
+    ): Promise<Array<{ id: string; path: string; preview: string; status: string }>>;
+  }).serializeRecallResults(
+    {
+      sessionKey: "session-1",
+      recordedAt: "2026-06-16T12:00:00.000Z",
+      queryHash: "hash",
+      queryLen: 4,
+      memoryIds: [],
+      namespace: "default",
+      resultPaths: [`${collection}/archive/facts/2026-06-16/fact-001.md`],
+    },
+    "summary",
+  );
+
+  assert.equal(result.length, 1);
+  assert.equal(result[0].id, "fact-001");
+  assert.equal(result[0].path, memoryPath);
+  assert.equal(result[0].status, "archived");
+  assert.ok(result[0].preview.includes("Agent-authored status update"));
+  assert.ok(
+    readCalls.some(
+      (call) => call.namespace === "team" && call.path === memoryPath,
+    ),
+    "expected collection-prefixed result path to resolve through team storage",
+  );
+});
+
+test("last recall serialization does not fall back after namespace collection misses", async () => {
+  const service = Object.create(EngramAccessService.prototype) as EngramAccessService;
+  const memoryRoot = await mkdtemp(path.join(os.tmpdir(), "remnic-access-qmd-ns-miss-"));
+  const defaultMemoryPath = path.join(
+    memoryRoot,
+    "facts",
+    "2026-06-16",
+    "fact-001.md",
+  );
+  const defaultMemory = {
+    path: defaultMemoryPath,
+    frontmatter: {
+      id: "fact-001",
+      created: "2026-06-16T12:00:00.000Z",
+      updated: "2026-06-16T12:00:00.000Z",
+      category: "fact",
+      status: "active",
+    },
+    content: "Default namespace content should not be reused.",
+  };
+  const teamDir = path.join(
+    memoryRoot,
+    "namespaces",
+    namespaceIdentityToken("team"),
+  );
+  const readCalls: Array<{ namespace: string; path: string }> = [];
+  const storages: Record<string, StorageManager> = {
+    default: {
+      dir: memoryRoot,
+      async readMemoryByPath(filePath: string) {
+        readCalls.push({ namespace: "default", path: filePath });
+        return filePath === defaultMemoryPath ? defaultMemory : null;
+      },
+      async getMemoryById() {
+        return null;
+      },
+    } as unknown as StorageManager,
+    team: {
+      dir: teamDir,
+      async readMemoryByPath(filePath: string) {
+        readCalls.push({ namespace: "team", path: filePath });
+        return null;
+      },
+      async getMemoryById() {
+        return null;
+      },
+    } as unknown as StorageManager,
+  };
+
+  (service as unknown as {
+    orchestrator: {
+      config: PluginConfig;
+      getStorage(namespace: string): Promise<StorageManager>;
+    };
+  }).orchestrator = {
+    config: makeConfig(),
+    async getStorage(namespace: string) {
+      return storages[namespace] ?? storages.default;
+    },
+  };
+
+  const collection = namespaceCollectionName("test-memory", "team", {
+    defaultNamespace: "default",
+    useLegacyDefaultCollection: false,
+  });
+  const result = await (service as unknown as {
+    serializeRecallResults(
+      snapshot: unknown,
+      disclosure: "summary",
+    ): Promise<Array<{ id: string; path: string; preview: string; status: string }>>;
+  }).serializeRecallResults(
+    {
+      sessionKey: "session-1",
+      recordedAt: "2026-06-16T12:00:00.000Z",
+      queryHash: "hash",
+      queryLen: 4,
+      memoryIds: [],
+      namespace: "default",
+      resultPaths: [`${collection}/2026-06-16/fact-001.md`],
+    },
+    "summary",
+  );
+
+  assert.deepEqual(result, []);
+  assert.ok(
+    readCalls.every((call) => call.namespace === "team"),
+    "expected recognized collection-prefixed miss not to probe default storage",
+  );
+});
+
+test("last recall serialization resolves cold collection paths through snapshot storage", async () => {
+  const service = Object.create(EngramAccessService.prototype) as EngramAccessService;
+  const memoryRoot = await mkdtemp(path.join(os.tmpdir(), "remnic-access-qmd-cold-"));
+  const coldMemoryPath = path.join(
+    memoryRoot,
+    "cold",
+    "facts",
+    "2026-06-16",
+    "fact-001.md",
+  );
+  const coldMemory = {
+    path: coldMemoryPath,
+    frontmatter: {
+      id: "fact-001",
+      created: "2026-06-16T12:00:00.000Z",
+      updated: "2026-06-16T12:00:00.000Z",
+      category: "fact",
+      status: "active",
+    },
+    content: "Cold namespace recall content.",
+  };
+  const readCalls: string[] = [];
+  const storage = {
+    dir: memoryRoot,
+    async readMemoryByPath(filePath: string) {
+      readCalls.push(filePath);
+      return filePath === coldMemoryPath ? coldMemory : null;
+    },
+    async getMemoryById() {
+      return null;
+    },
+  } as unknown as StorageManager;
+
+  (service as unknown as {
+    orchestrator: {
+      config: PluginConfig;
+      getStorage(namespace: string): Promise<StorageManager>;
+    };
+  }).orchestrator = {
+    config: {
+      ...makeConfig(),
+      qmdColdCollection: "test-memory-cold",
+    },
+    async getStorage() {
+      return storage;
+    },
+  };
+
+  const result = await (service as unknown as {
+    serializeRecallResults(
+      snapshot: unknown,
+      disclosure: "summary",
+    ): Promise<Array<{ id: string; path: string; preview: string; status: string }>>;
+  }).serializeRecallResults(
+    {
+      sessionKey: "session-1",
+      recordedAt: "2026-06-16T12:00:00.000Z",
+      queryHash: "hash",
+      queryLen: 4,
+      memoryIds: [],
+      namespace: "default",
+      resultPaths: ["test-memory-cold/facts/2026-06-16/fact-001.md"],
+    },
+    "summary",
+  );
+
+  assert.equal(result.length, 1);
+  assert.equal(result[0].id, "fact-001");
+  assert.equal(result[0].path, coldMemoryPath);
+  assert.ok(result[0].preview.includes("Cold namespace recall content"));
+  assert.ok(readCalls.includes(coldMemoryPath));
+  assert.ok(
+    !readCalls.includes(path.join(memoryRoot, "test-memory-cold", "facts", "2026-06-16", "fact-001.md")),
+    "expected cold collection path to resolve under cold/ rather than a collection-named subdirectory",
+  );
+});
+
+test("last recall serialization propagates locked namespace collection errors", async () => {
+  const service = Object.create(EngramAccessService.prototype) as EngramAccessService;
+  const memoryRoot = await mkdtemp(path.join(os.tmpdir(), "remnic-access-qmd-lock-"));
+  const teamDir = path.join(
+    memoryRoot,
+    "namespaces",
+    namespaceIdentityToken("team"),
+  );
+  const storage = {
+    dir: memoryRoot,
+    async readMemoryByPath() {
+      return null;
+    },
+    async getMemoryById() {
+      return null;
+    },
+  } as unknown as StorageManager;
+  const teamStorage = {
+    dir: teamDir,
+    async readMemoryByPath() {
+      throw new SecureStoreLockedError("locked namespace store");
+    },
+    async getMemoryById() {
+      return null;
+    },
+  } as unknown as StorageManager;
+
+  (service as unknown as {
+    orchestrator: {
+      config: PluginConfig;
+      getStorage(namespace: string): Promise<StorageManager>;
+    };
+  }).orchestrator = {
+    config: makeConfig(),
+    async getStorage(namespace: string) {
+      return namespace === "team" ? teamStorage : storage;
+    },
+  };
+
+  const collection = namespaceCollectionName("test-memory", "team", {
+    defaultNamespace: "default",
+    useLegacyDefaultCollection: false,
+  });
+
+  await assert.rejects(
+    async () =>
+      await (service as unknown as {
+        serializeRecallResults(
+          snapshot: unknown,
+          disclosure: "summary",
+        ): Promise<Array<{ id: string; path: string; preview: string; status: string }>>;
+      }).serializeRecallResults(
+        {
+          sessionKey: "session-1",
+          recordedAt: "2026-06-16T12:00:00.000Z",
+          queryHash: "hash",
+          queryLen: 4,
+          memoryIds: [],
+          namespace: "default",
+          resultPaths: [`${collection}/2026-06-16/fact-001.md`],
+        },
+        "summary",
+      ),
+    SecureStoreLockedError,
+  );
+});
+
+test("last recall serialization does not treat date paths as collection prefixes", async () => {
+  const service = Object.create(EngramAccessService.prototype) as EngramAccessService;
+  const memoryRoot = await mkdtemp(path.join(os.tmpdir(), "remnic-access-qmd-date-miss-"));
+  const rootMemoryPath = path.join(memoryRoot, "fact-001.md");
+  const rootMemory = {
+    path: rootMemoryPath,
+    frontmatter: {
+      id: "fact-001",
+      created: "2026-06-16T12:00:00.000Z",
+      updated: "2026-06-16T12:00:00.000Z",
+      category: "fact",
+      status: "active",
+    },
+    content: "Root basename content should not be reused.",
+  };
+  const readCalls: string[] = [];
+  const storage = {
+    dir: memoryRoot,
+    async readMemoryByPath(filePath: string) {
+      readCalls.push(filePath);
+      return filePath === rootMemoryPath ? rootMemory : null;
+    },
+    async getMemoryById() {
+      return null;
+    },
+  } as unknown as StorageManager;
+
+  (service as unknown as {
+    orchestrator: {
+      config: PluginConfig;
+      getStorage(namespace: string): Promise<StorageManager>;
+    };
+  }).orchestrator = {
+    config: makeConfig(),
+    async getStorage() {
+      return storage;
+    },
+  };
+
+  const result = await (service as unknown as {
+    serializeRecallResults(
+      snapshot: unknown,
+      disclosure: "summary",
+    ): Promise<Array<{ id: string; path: string; preview: string; status: string }>>;
+  }).serializeRecallResults(
+    {
+      sessionKey: "session-1",
+      recordedAt: "2026-06-16T12:00:00.000Z",
+      queryHash: "hash",
+      queryLen: 4,
+      memoryIds: [],
+      namespace: "default",
+      resultPaths: ["2026-06-16/fact-001.md"],
+    },
+    "summary",
+  );
+
+  assert.deepEqual(result, []);
+  assert.ok(
+    !readCalls.includes(rootMemoryPath),
+    "expected date-relative miss not to probe storage root basename",
+  );
+});
+
+test("last recall serialization does not strip invalid collection prefixes", async () => {
+  const service = Object.create(EngramAccessService.prototype) as EngramAccessService;
+  const memoryRoot = await mkdtemp(path.join(os.tmpdir(), "remnic-access-qmd-invalid-prefix-"));
+  const defaultMemoryPath = path.join(
+    memoryRoot,
+    "facts",
+    "2026-06-16",
+    "fact-001.md",
+  );
+  const defaultMemory = {
+    path: defaultMemoryPath,
+    frontmatter: {
+      id: "fact-001",
+      created: "2026-06-16T12:00:00.000Z",
+      updated: "2026-06-16T12:00:00.000Z",
+      category: "fact",
+      status: "active",
+    },
+    content: "Default namespace content should not be reused.",
+  };
+  const readCalls: string[] = [];
+  const storage = {
+    dir: memoryRoot,
+    async readMemoryByPath(filePath: string) {
+      readCalls.push(filePath);
+      return filePath === defaultMemoryPath ? defaultMemory : null;
+    },
+    async getMemoryById() {
+      return null;
+    },
+  } as unknown as StorageManager;
+
+  (service as unknown as {
+    orchestrator: {
+      config: PluginConfig;
+      getStorage(namespace: string): Promise<StorageManager>;
+    };
+  }).orchestrator = {
+    config: makeConfig(),
+    async getStorage() {
+      return storage;
+    },
+  };
+
+  const result = await (service as unknown as {
+    serializeRecallResults(
+      snapshot: unknown,
+      disclosure: "summary",
+    ): Promise<Array<{ id: string; path: string; preview: string; status: string }>>;
+  }).serializeRecallResults(
+    {
+      sessionKey: "session-1",
+      recordedAt: "2026-06-16T12:00:00.000Z",
+      queryHash: "hash",
+      queryLen: 4,
+      memoryIds: [],
+      namespace: "default",
+      resultPaths: ["test-memory--not-a-token/2026-06-16/fact-001.md"],
+    },
+    "summary",
+  );
+
+  assert.deepEqual(result, []);
+  assert.ok(
+    !readCalls.includes(defaultMemoryPath),
+    "expected invalid collection prefix not to probe stripped default path",
+  );
+});
+
+test("last recall serialization preserves absolute paths from readable namespace storage", async () => {
+  const service = Object.create(EngramAccessService.prototype) as EngramAccessService;
+  const memoryRoot = await mkdtemp(path.join(os.tmpdir(), "remnic-access-cross-ns-"));
+  const teamDir = path.join(
+    memoryRoot,
+    "namespaces",
+    namespaceIdentityToken("team"),
+  );
+  const sharedDir = path.join(
+    memoryRoot,
+    "namespaces",
+    namespaceIdentityToken("shared"),
+  );
+  const sharedMemoryPath = path.join(
+    sharedDir,
+    "facts",
+    "2026-06-16",
+    "fact-shared.md",
+  );
+  const sharedMemory = {
+    path: sharedMemoryPath,
+    frontmatter: {
+      id: "fact-shared",
+      created: "2026-06-16T12:00:00.000Z",
+      updated: "2026-06-16T12:00:00.000Z",
+      category: "fact",
+      status: "active",
+    },
+    content: "Shared namespace content should survive serialization.",
+  };
+  const readCalls: Array<{ namespace: string; path: string }> = [];
+  const defaultStorage = {
+    dir: memoryRoot,
+    async readMemoryByPath(filePath: string) {
+      readCalls.push({ namespace: "default", path: filePath });
+      return null;
+    },
+    async getMemoryById() {
+      return null;
+    },
+  } as unknown as StorageManager;
+  const teamStorage = {
+    dir: teamDir,
+    async readMemoryByPath(filePath: string) {
+      readCalls.push({ namespace: "team", path: filePath });
+      return null;
+    },
+    async getMemoryById() {
+      return null;
+    },
+  } as unknown as StorageManager;
+  const sharedStorage = {
+    dir: sharedDir,
+    async readMemoryByPath(filePath: string) {
+      readCalls.push({ namespace: "shared", path: filePath });
+      return filePath === sharedMemoryPath ? sharedMemory : null;
+    },
+    async getMemoryById() {
+      return null;
+    },
+  } as unknown as StorageManager;
+
+  (service as unknown as {
+    orchestrator: {
+      config: PluginConfig;
+      getStorage(namespace: string): Promise<StorageManager>;
+    };
+  }).orchestrator = {
+    config: makeConfig(),
+    async getStorage(namespace: string) {
+      if (namespace === "team") return teamStorage;
+      if (namespace === "shared") return sharedStorage;
+      return defaultStorage;
+    },
+  };
+
+  const result = await (service as unknown as {
+    serializeRecallResults(
+      snapshot: unknown,
+      disclosure: "summary",
+    ): Promise<Array<{ id: string; path: string; preview: string; status: string }>>;
+  }).serializeRecallResults(
+    {
+      sessionKey: "session-1",
+      recordedAt: "2026-06-16T12:00:00.000Z",
+      queryHash: "hash",
+      queryLen: 4,
+      memoryIds: [],
+      namespace: "team",
+      resultPaths: [sharedMemoryPath],
+    },
+    "summary",
+  );
+
+  assert.equal(result.length, 1);
+  assert.equal(result[0].id, "fact-shared");
+  assert.equal(result[0].path, sharedMemoryPath);
+  assert.deepEqual(readCalls, [{ namespace: "shared", path: sharedMemoryPath }]);
+});
+
+test("last recall serialization preserves absolute paths from dynamic namespace storage", async () => {
+  const service = Object.create(EngramAccessService.prototype) as EngramAccessService;
+  const memoryRoot = await mkdtemp(path.join(os.tmpdir(), "remnic-access-dynamic-ns-"));
+  const dynamicNamespace = "team-project-alpha";
+  const dynamicDir = path.join(
+    memoryRoot,
+    "namespaces",
+    namespaceIdentityToken(dynamicNamespace),
+  );
+  const dynamicMemoryPath = path.join(
+    dynamicDir,
+    "facts",
+    "2026-06-16",
+    "fact-dynamic.md",
+  );
+  const dynamicMemory = {
+    path: dynamicMemoryPath,
+    frontmatter: {
+      id: "fact-dynamic",
+      created: "2026-06-16T12:00:00.000Z",
+      updated: "2026-06-16T12:00:00.000Z",
+      category: "fact",
+      status: "active",
+    },
+    content: "Dynamic namespace content should survive serialization.",
+  };
+  const readCalls: Array<{ namespace: string; path: string }> = [];
+  const defaultStorage = {
+    dir: memoryRoot,
+    async readMemoryByPath(filePath: string) {
+      readCalls.push({ namespace: "default", path: filePath });
+      return null;
+    },
+    async getMemoryById() {
+      return null;
+    },
+  } as unknown as StorageManager;
+  const dynamicStorage = {
+    dir: dynamicDir,
+    async readMemoryByPath(filePath: string) {
+      readCalls.push({ namespace: dynamicNamespace, path: filePath });
+      return filePath === dynamicMemoryPath ? dynamicMemory : null;
+    },
+    async getMemoryById() {
+      return null;
+    },
+  } as unknown as StorageManager;
+
+  (service as unknown as {
+    orchestrator: {
+      config: PluginConfig;
+      getStorage(namespace: string): Promise<StorageManager>;
+    };
+  }).orchestrator = {
+    config: { ...makeConfig(), memoryDir: memoryRoot },
+    async getStorage(namespace: string) {
+      return namespace === dynamicNamespace ? dynamicStorage : defaultStorage;
+    },
+  };
+
+  const result = await (service as unknown as {
+    serializeRecallResults(
+      snapshot: unknown,
+      disclosure: "summary",
+    ): Promise<Array<{ id: string; path: string; preview: string; status: string }>>;
+  }).serializeRecallResults(
+    {
+      sessionKey: "session-1",
+      recordedAt: "2026-06-16T12:00:00.000Z",
+      queryHash: "hash",
+      queryLen: 4,
+      memoryIds: [],
+      namespace: "team",
+      resultPaths: [dynamicMemoryPath],
+    },
+    "summary",
+  );
+
+  assert.equal(result.length, 1);
+  assert.equal(result[0].id, "fact-dynamic");
+  assert.deepEqual(readCalls, [
+    { namespace: dynamicNamespace, path: dynamicMemoryPath },
+  ]);
+});
+
+test("last recall serialization rejects traversing collection paths", async () => {
+  const service = Object.create(EngramAccessService.prototype) as EngramAccessService;
+  const memoryRoot = await mkdtemp(path.join(os.tmpdir(), "remnic-access-qmd-traversal-"));
+  const defaultMemoryPath = path.join(
+    memoryRoot,
+    "facts",
+    "2026-06-16",
+    "fact-001.md",
+  );
+  const defaultMemory = {
+    path: defaultMemoryPath,
+    frontmatter: {
+      id: "fact-001",
+      created: "2026-06-16T12:00:00.000Z",
+      updated: "2026-06-16T12:00:00.000Z",
+      category: "fact",
+      status: "active",
+    },
+    content: "Default namespace content should not be reused.",
+  };
+  const teamDir = path.join(
+    memoryRoot,
+    "namespaces",
+    namespaceIdentityToken("team"),
+  );
+  const readCalls: Array<{ namespace: string; path: string }> = [];
+  const storage = {
+    dir: memoryRoot,
+    async readMemoryByPath(filePath: string) {
+      readCalls.push({ namespace: "default", path: filePath });
+      return filePath === defaultMemoryPath ? defaultMemory : null;
+    },
+    async getMemoryById() {
+      return null;
+    },
+  } as unknown as StorageManager;
+  const teamStorage = {
+    dir: teamDir,
+    async readMemoryByPath(filePath: string) {
+      readCalls.push({ namespace: "team", path: filePath });
+      return filePath === defaultMemoryPath ? defaultMemory : null;
+    },
+    async getMemoryById() {
+      return null;
+    },
+  } as unknown as StorageManager;
+
+  (service as unknown as {
+    orchestrator: {
+      config: PluginConfig;
+      getStorage(namespace: string): Promise<StorageManager>;
+    };
+  }).orchestrator = {
+    config: makeConfig(),
+    async getStorage(namespace: string) {
+      return namespace === "team" ? teamStorage : storage;
+    },
+  };
+
+  const collection = namespaceCollectionName("test-memory", "team", {
+    defaultNamespace: "default",
+    useLegacyDefaultCollection: false,
+  });
+  const result = await (service as unknown as {
+    serializeRecallResults(
+      snapshot: unknown,
+      disclosure: "summary",
+    ): Promise<Array<{ id: string; path: string; preview: string; status: string }>>;
+  }).serializeRecallResults(
+    {
+      sessionKey: "session-1",
+      recordedAt: "2026-06-16T12:00:00.000Z",
+      queryHash: "hash",
+      queryLen: 4,
+      memoryIds: [],
+      namespace: "default",
+      resultPaths: [`${collection}/../../facts/2026-06-16/fact-001.md`],
+    },
+    "summary",
+  );
+
+  assert.deepEqual(result, []);
+  assert.ok(
+    !readCalls.some((call) => call.path === defaultMemoryPath),
+    "expected traversing collection path not to probe escaped default path",
+  );
 });
 
 test("memorySearch without an explicit namespace uses readable recall namespaces", async () => {

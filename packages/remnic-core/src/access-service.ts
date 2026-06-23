@@ -54,7 +54,10 @@ import {
 } from "./memory-lifecycle-ledger-utils.js";
 import { getMemoryProjectionPath } from "./memory-projection-store.js";
 import { canReadNamespace, canWriteNamespace, defaultNamespaceForPrincipal, recallNamespacesForPrincipal, resolvePrincipal } from "./namespaces/principal.js";
+import { namespaceIdentityFromToken } from "./namespaces/identity.js";
 import { namespaceCollectionName } from "./namespaces/search.js";
+import { SecureStoreLockedError } from "./secure-store/index.js";
+import { isPathInsideStorageRoot } from "./storage-paths.js";
 import type { LastRecallSnapshot } from "./recall-state.js";
 import type {
   GraphRecallSnapshot,
@@ -167,6 +170,52 @@ import {
 import { formatProfileTraceAscii } from "./profiling.js";
 
 export class EngramAccessInputError extends Error {}
+
+function qmdCollectionPathParts(resultPath: string): {
+  collection: string;
+  relativePath: string;
+} | null {
+  if (!resultPath || nodePath.isAbsolute(resultPath)) return null;
+  const normalized = resultPath.replace(/\\/g, "/").replace(/^\/+/, "");
+  const slashIndex = normalized.indexOf("/");
+  if (slashIndex <= 0 || slashIndex >= normalized.length - 1) return null;
+  const collection = normalized.slice(0, slashIndex);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(collection)) return null;
+  return {
+    collection,
+    relativePath: normalized.slice(slashIndex + 1),
+  };
+}
+
+function qmdResultPathCandidates(
+  storageDir: string,
+  resultPath: string,
+): string[] {
+  const candidates = new Set<string>();
+  const storageRoot = nodePath.resolve(storageDir);
+  const addCandidate = (candidate: string) => {
+    const resolved = nodePath.resolve(candidate);
+    if (isPathInsideStorageRoot(storageRoot, resolved)) {
+      candidates.add(resolved);
+    }
+  };
+  const addRelativeCandidates = (relativePath: string) => {
+    const normalized = relativePath.replace(/\\/g, "/").replace(/^\/+/, "");
+    if (!normalized) return;
+    addCandidate(nodePath.join(storageRoot, normalized));
+    if (/^\d{4}-\d{2}-\d{2}\//.test(normalized)) {
+      addCandidate(nodePath.join(storageRoot, "facts", normalized));
+    }
+  };
+
+  if (nodePath.isAbsolute(resultPath)) {
+    addCandidate(resultPath);
+  } else {
+    addRelativeCandidates(resultPath);
+  }
+
+  return [...candidates];
+}
 
 type AccessProfilingReportRequest = {
   format?: string;
@@ -1437,6 +1486,7 @@ export class EngramAccessService {
       queryLen: options.query.length,
       memoryIds,
       namespace,
+      recallNamespaces: [namespace],
       traceId: options.snapshot.traceId,
       plannerMode: options.normalizedMode,
       requestedMode:
@@ -1500,8 +1550,124 @@ export class EngramAccessService {
     const namespace = snapshot.namespace ? this.resolveNamespace(snapshot.namespace) : this.orchestrator.config.defaultNamespace;
     const storage = await this.orchestrator.getStorage(namespace);
     const storageDir = storage.dir;
+    const recallNamespaces = Array.from(
+      new Set(
+        [
+          namespace,
+          ...(Array.isArray(snapshot.recallNamespaces)
+            ? snapshot.recallNamespaces.map((ns) => this.resolveNamespace(ns))
+            : []),
+          this.orchestrator.config.defaultNamespace,
+          this.orchestrator.config.sharedNamespace,
+          ...(this.orchestrator.config.namespacePolicies ?? []).map((p) => p.name),
+        ].filter((ns): ns is string => typeof ns === "string" && ns.length > 0),
+      ),
+    );
     const results: EngramAccessMemorySummary[] = [];
     const seen = new Set<string>();
+    const collectionNamespaceFromPrefix = (collectionPrefix: string): string | null => {
+      const baseCollection = this.orchestrator.config.qmdCollection;
+      if (collectionPrefix === baseCollection) return this.orchestrator.config.defaultNamespace;
+      const namespaceSuffix = collectionPrefix.startsWith(`${baseCollection}--`)
+        ? collectionPrefix.slice(baseCollection.length + 2)
+        : "";
+      if (!namespaceSuffix) return null;
+
+      const decoded = namespaceIdentityFromToken(namespaceSuffix);
+      if (decoded !== null) return decoded || this.orchestrator.config.defaultNamespace;
+      if (namespaceSuffix.startsWith("ns--")) {
+        const legacyNamespace = namespaceSuffix.slice("ns--".length).trim();
+        return legacyNamespace || null;
+      }
+      return null;
+    };
+    const readResultPath = async (
+      memoryPath: string,
+    ): Promise<{ memory: MemoryFile; baseDir: string } | null> => {
+      const parts = qmdCollectionPathParts(memoryPath);
+      const coldCollection =
+        this.orchestrator.config.qmdColdCollection ?? "openclaw-engram-cold";
+      if (parts && parts.collection === coldCollection) {
+        const storages: Array<{ storage: StorageManager; dir: string }> = [];
+        const seenStorageDirs = new Set<string>();
+        const addStorage = (candidateStorage: StorageManager): void => {
+          const candidateDir = nodePath.resolve(candidateStorage.dir);
+          if (seenStorageDirs.has(candidateDir)) return;
+          seenStorageDirs.add(candidateDir);
+          storages.push({ storage: candidateStorage, dir: candidateDir });
+        };
+        addStorage(storage);
+        for (const recallNamespace of recallNamespaces) {
+          try {
+            addStorage(await this.orchestrator.getStorage(recallNamespace));
+          } catch {
+            continue;
+          }
+        }
+        for (const candidateStorage of storages) {
+          try {
+            const coldRoot = nodePath.join(candidateStorage.dir, "cold");
+            for (const candidatePath of qmdResultPathCandidates(
+              coldRoot,
+              parts.relativePath,
+            )) {
+              const memory =
+                await candidateStorage.storage.readMemoryByPath(candidatePath);
+              if (memory) return { memory, baseDir: candidateStorage.dir };
+            }
+          } catch (err) {
+            if (err instanceof SecureStoreLockedError) throw err;
+            continue;
+          }
+        }
+        return null;
+      }
+
+      const collectionNamespace = parts
+        ? collectionNamespaceFromPrefix(parts.collection)
+        : null;
+
+      if (parts && collectionNamespace) {
+        try {
+          const collectionStorage =
+            await this.orchestrator.getStorage(collectionNamespace);
+          for (const candidate of qmdResultPathCandidates(
+            collectionStorage.dir,
+            parts.relativePath,
+          )) {
+            const memory = await collectionStorage.readMemoryByPath(candidate);
+            if (memory) return { memory, baseDir: collectionStorage.dir };
+          }
+          return null;
+        } catch (err) {
+          if (err instanceof SecureStoreLockedError) throw err;
+          return null;
+        }
+      }
+
+      if (nodePath.isAbsolute(memoryPath)) {
+        const ownerStorage = await this.storageForAbsoluteRecallPath(
+          memoryPath,
+          namespace,
+          recallNamespaces,
+        );
+        if (!ownerStorage) return null;
+        for (const candidate of qmdResultPathCandidates(
+          ownerStorage.dir,
+          memoryPath,
+        )) {
+          const memory = await ownerStorage.storage.readMemoryByPath(candidate);
+          if (memory) return { memory, baseDir: ownerStorage.dir };
+        }
+        return null;
+      }
+
+      for (const candidate of qmdResultPathCandidates(storageDir, memoryPath)) {
+        const memory = await storage.readMemoryByPath(candidate);
+        if (memory) return { memory, baseDir: storageDir };
+      }
+      return null;
+    };
 
     // Pre-fetch raw excerpts once when `disclosure === "raw"` so we don't
     // hit the LCM archive per-result (issue #677 PR 2/4).  Excerpts are
@@ -1519,13 +1685,14 @@ export class EngramAccessService {
 
     for (const memoryPath of snapshot.resultPaths ?? []) {
       if (!memoryPath || seen.has(memoryPath)) continue;
-      const memory = await storage.readMemoryByPath(memoryPath);
-      if (!memory) continue;
+      const resolved = await readResultPath(memoryPath);
+      if (!resolved) continue;
+      const { memory, baseDir } = resolved;
       seen.add(memoryPath);
       results.push(
         this.serializeMemorySummary(
           memory,
-          storageDir,
+          baseDir,
           disclosure,
           // Attach the (possibly empty) raw excerpts to the first raw
           // result; subsequent results do not duplicate the array.
@@ -1550,6 +1717,58 @@ export class EngramAccessService {
       );
     }
     return results;
+  }
+
+  private async storageForAbsoluteRecallPath(
+    memoryPath: string,
+    primaryNamespace: string,
+    recallNamespaces: readonly string[] = [],
+  ): Promise<{ storage: StorageManager; dir: string } | null> {
+    const resolvedPath = nodePath.resolve(memoryPath);
+    const memoryRoot = nodePath.resolve(this.orchestrator.config.memoryDir);
+    const namespacesRoot = nodePath.join(memoryRoot, "namespaces");
+    const configuredNamespaces = new Set<string>();
+    configuredNamespaces.add(primaryNamespace);
+    for (const namespace of recallNamespaces) {
+      configuredNamespaces.add(namespace);
+    }
+    configuredNamespaces.add(this.orchestrator.config.defaultNamespace);
+    configuredNamespaces.add(this.orchestrator.config.sharedNamespace);
+    if (isPathInsideStorageRoot(namespacesRoot, resolvedPath)) {
+      const relativeToNamespaces = nodePath.relative(namespacesRoot, resolvedPath);
+      const [namespaceSegment] = relativeToNamespaces.split(/[\\/]/);
+      if (namespaceSegment) {
+        configuredNamespaces.add(
+          namespaceIdentityFromToken(namespaceSegment) ?? namespaceSegment,
+        );
+      }
+    }
+    for (const policy of this.orchestrator.config.namespacePolicies ?? []) {
+      configuredNamespaces.add(policy.name);
+    }
+
+    const matches: Array<{ storage: StorageManager; dir: string }> = [];
+    for (const ns of configuredNamespaces) {
+      if (!ns) continue;
+      let candidateStorage: StorageManager;
+      try {
+        candidateStorage = await this.orchestrator.getStorage(ns);
+      } catch {
+        continue;
+      }
+      const candidateRoot = nodePath.resolve(candidateStorage.dir);
+      if (!isPathInsideStorageRoot(candidateRoot, resolvedPath)) continue;
+      if (
+        candidateRoot === memoryRoot &&
+        isPathInsideStorageRoot(namespacesRoot, resolvedPath)
+      ) {
+        continue;
+      }
+      matches.push({ storage: candidateStorage, dir: candidateRoot });
+    }
+
+    matches.sort((a, b) => b.dir.length - a.dir.length);
+    return matches[0] ?? null;
   }
 
   /**

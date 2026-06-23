@@ -29,6 +29,7 @@ export interface LastRecallSnapshot {
   queryLen: number;
   memoryIds: string[];
   namespace?: string;
+  recallNamespaces?: string[];
   traceId?: string;
   plannerMode?: RecallPlanMode;
   requestedMode?: RecallPlanMode;
@@ -247,6 +248,7 @@ export class LastRecallStore {
     query: string;
     memoryIds: string[];
     namespace?: string;
+    recallNamespaces?: string[];
     traceId?: string;
     plannerMode?: RecallPlanMode;
     requestedMode?: RecallPlanMode;
@@ -285,6 +287,7 @@ export class LastRecallStore {
       queryLen: opts.query.length,
       memoryIds: opts.memoryIds,
       namespace: opts.namespace,
+      recallNamespaces: opts.recallNamespaces,
       traceId: opts.traceId,
       plannerMode: opts.plannerMode,
       requestedMode: opts.requestedMode,

@@ -517,6 +517,8 @@ export class GraphIndex {
        * Default `false` (floor from config is applied).
        */
       includeLowConfidence?: boolean;
+      /** Absolute deadline in ms-since-epoch for post-retrieval assembly. */
+      deadlineAtMs?: number;
     }
   ): Promise<
     Array<{
@@ -545,15 +547,22 @@ export class GraphIndex {
     const floor =
       opts?.includeLowConfidence === true ? 0 : clampConfidenceFloor(this.cfg.graphTraversalConfidenceFloor);
     const iterations = clampPageRankIterations(this.cfg.graphTraversalPageRankIterations);
+    const deadlineAtMs = opts?.deadlineAtMs;
+    const deadlineExpired = (): boolean =>
+      typeof deadlineAtMs === "number" && Date.now() >= deadlineAtMs;
 
     try {
+      if (deadlineExpired()) return [];
       const allEdges = await this.loadEdgesCached();
+      if (deadlineExpired()) return [];
 
       // Build adjacency index: from → edges, to → edges (bidirectional for entity/time, directional for causal).
       // Edges below the confidence floor are pruned at index time so neither
       // direct activation nor downstream BFS expansion can re-introduce them.
       const adj = new Map<string, GraphEdge[]>();
-      for (const edge of allEdges) {
+      for (let i = 0; i < allEdges.length; i += 1) {
+        if ((i & 1023) === 0 && deadlineExpired()) return [];
+        const edge = allEdges[i];
         const conf = readEdgeConfidence(edge);
         if (conf < floor) continue;
         if (!adj.has(edge.from)) adj.set(edge.from, []);
@@ -583,13 +592,28 @@ export class GraphIndex {
         frontier.set(`${seed}\0${seed}`, { node: seed, seed, activation: 1 });
         reachedBySeed.set(seed, new Set([seed]));
       }
+      const finalizeScores = () =>
+        Array.from(scores.entries())
+          .map(([p, score]) => ({
+            path: p,
+            score,
+            seed: provenance.get(p)?.seed ?? "",
+            hopDepth: provenance.get(p)?.hopDepth ?? 0,
+            decayedWeight: provenance.get(p)?.decayedWeight ?? 0,
+            graphType: provenance.get(p)?.graphType ?? "entity",
+            edgeConfidence: provenance.get(p)?.edgeConfidence ?? 1,
+          }))
+          .sort((a, b) => b.score - a.score);
 
       for (let hop = 0; hop < steps && frontier.size > 0; hop++) {
+        if (deadlineExpired()) return finalizeScores();
         const nextFrontier = new Map<string, { node: string; seed: string; activation: number }>();
 
         for (const { node, seed: sourceSeed, activation } of frontier.values()) {
           const edges = adj.get(node) ?? [];
-          for (const edge of edges) {
+          for (let i = 0; i < edges.length; i += 1) {
+            if ((i & 1023) === 0 && deadlineExpired()) return finalizeScores();
+            const edge = edges[i];
             const neighbor = edge.to === node ? edge.from : edge.to;
             const conf = readEdgeConfidence(edge);
             // Defense in depth: the adjacency build already drops sub-floor
@@ -645,15 +669,17 @@ export class GraphIndex {
       // edges, weighted by edge confidence. Damping is fixed at the
       // canonical 0.85 so the ranking stays comparable across queries;
       // the `iterations` knob bounds compute, not behavior shape.
-      if (iterations > 0 && scores.size > 1) {
+      if (!deadlineExpired() && iterations > 0 && scores.size > 1) {
         applyPageRankRefinement(scores, adj, {
           iterations,
           floor,
           damping: 0.85,
+          deadlineAtMs,
         });
       }
 
       // Apply lateral inhibition if enabled (Synapse-inspired competitive suppression)
+      if (deadlineExpired()) return finalizeScores();
       if (this.cfg.graphLateralInhibitionEnabled && scores.size > 1) {
         const inhibited = applyLateralInhibition(scores, {
           beta: this.cfg.graphLateralInhibitionBeta,
@@ -664,17 +690,7 @@ export class GraphIndex {
         }
       }
 
-      return Array.from(scores.entries())
-        .map(([p, score]) => ({
-          path: p,
-          score,
-          seed: provenance.get(p)?.seed ?? "",
-          hopDepth: provenance.get(p)?.hopDepth ?? 0,
-          decayedWeight: provenance.get(p)?.decayedWeight ?? 0,
-          graphType: provenance.get(p)?.graphType ?? "entity",
-          edgeConfidence: provenance.get(p)?.edgeConfidence ?? 1,
-        }))
-        .sort((a, b) => b.score - a.score);
+      return finalizeScores();
     } catch (err) {
       const { log } = await import("./logger.js");
       log.warn(`[graph] spreadingActivation error: ${err}`);
@@ -725,11 +741,13 @@ export function clampPageRankIterations(raw: unknown): number {
 export function applyPageRankRefinement(
   scores: Map<string, number>,
   adj: Map<string, GraphEdge[]>,
-  opts: { iterations: number; floor: number; damping: number }
+  opts: { iterations: number; floor: number; damping: number; deadlineAtMs?: number }
 ): void {
-  const { iterations, floor, damping } = opts;
+  const { iterations, floor, damping, deadlineAtMs } = opts;
   if (iterations <= 0 || scores.size === 0) return;
   const safeDamping = Math.min(1, Math.max(0, damping));
+  const deadlineExpired = (): boolean =>
+    typeof deadlineAtMs === "number" && Date.now() >= deadlineAtMs;
 
   // Pre-compute confidence-weighted out-edge totals for normalization.
   // Done once per refinement, not per iteration, since adjacency is
@@ -748,6 +766,7 @@ export function applyPageRankRefinement(
   };
   const outboundTotal = new Map<string, number>();
   for (const [node, edges] of adj.entries()) {
+    if (deadlineExpired()) return;
     if (!scores.has(node)) continue; // only candidate nodes redistribute
     let sum = 0;
     for (const edge of edges) {
@@ -758,6 +777,7 @@ export function applyPageRankRefinement(
   }
 
   for (let i = 0; i < iterations; i += 1) {
+    if (deadlineExpired()) return;
     const next = new Map<string, number>();
     // Teleport / damping floor: every node retains `(1 - damping) * score`
     // of its current activation so dangling nodes do not bleed to zero.
@@ -776,7 +796,9 @@ export function applyPageRankRefinement(
         next.set(node, (next.get(node) ?? 0) + safeDamping * score);
         continue;
       }
-      for (const edge of outEdges) {
+      for (let edgeIndex = 0; edgeIndex < outEdges.length; edgeIndex += 1) {
+        if ((edgeIndex & 1023) === 0 && deadlineExpired()) return;
+        const edge = outEdges[edgeIndex];
         if (!eligible(edge, node)) continue;
         const conf = readEdgeConfidence(edge);
         const neighbor = edge.to === node ? edge.from : edge.to;

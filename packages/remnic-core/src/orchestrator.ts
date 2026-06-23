@@ -153,6 +153,7 @@ import {
 import { CODEX_THREAD_KEY_PREFIX } from "./codex-thread-key.js";
 import { isDisagreementPrompt } from "./signal.js";
 import { lintWorkspaceFiles, rotateMarkdownFileToArchive } from "./hygiene.js";
+import { isPathInsideStorageRoot } from "./storage-paths.js";
 import { EmbeddingFallback } from "./embedding-fallback.js";
 import {
   decideSemanticDedup,
@@ -341,7 +342,11 @@ import {
   dedupeBehaviorSignalsByMemoryAndHash,
 } from "./behavior-signals.js";
 import { ProfilingCollector } from "./profiling.js";
-import { keyring, secureStoreDir } from "./secure-store/index.js";
+import {
+  keyring,
+  secureStoreDir,
+  SecureStoreLockedError,
+} from "./secure-store/index.js";
 import type {
   AccessTrackingEntry,
   BehaviorLoopPolicyState,
@@ -708,6 +713,52 @@ async function raceRecallAbort<T>(
       signal.removeEventListener("abort", onAbort);
     }
   }
+}
+
+function qmdCollectionPathParts(resultPath: string): {
+  collection: string;
+  relativePath: string;
+} | null {
+  if (!resultPath || path.isAbsolute(resultPath)) return null;
+  const normalized = resultPath.replace(/\\/g, "/").replace(/^\/+/, "");
+  const slashIndex = normalized.indexOf("/");
+  if (slashIndex <= 0 || slashIndex >= normalized.length - 1) return null;
+  const collection = normalized.slice(0, slashIndex);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(collection)) return null;
+  return {
+    collection,
+    relativePath: normalized.slice(slashIndex + 1),
+  };
+}
+
+function qmdResultPathCandidates(
+  storageDir: string,
+  resultPath: string,
+): string[] {
+  const candidates = new Set<string>();
+  const storageRoot = path.resolve(storageDir);
+  const addCandidate = (candidate: string) => {
+    const resolved = path.resolve(candidate);
+    if (isPathInsideStorageRoot(storageRoot, resolved)) {
+      candidates.add(resolved);
+    }
+  };
+  const addRelativeCandidates = (relativePath: string) => {
+    const normalized = relativePath.replace(/\\/g, "/").replace(/^\/+/, "");
+    if (!normalized) return;
+    addCandidate(path.join(storageRoot, normalized));
+    if (/^\d{4}-\d{2}-\d{2}\//.test(normalized)) {
+      addCandidate(path.join(storageRoot, "facts", normalized));
+    }
+  };
+
+  if (path.isAbsolute(resultPath)) {
+    addCandidate(resultPath);
+  } else {
+    addRelativeCandidates(resultPath);
+  }
+
+  return [...candidates];
 }
 
 /** Maximum age (ms) before a compaction-reset signal file is considered stale and removed. */
@@ -5939,6 +5990,7 @@ export class Orchestrator {
     memoryResults: QmdSearchResult[];
     recallNamespaces: string[];
     recallResultLimit: number;
+    deadlineAtMs?: number | null;
     /** Issue #681 — when true, bypass graphTraversalConfidenceFloor. */
     includeLowConfidence?: boolean;
   }): Promise<{
@@ -5947,16 +5999,90 @@ export class Orchestrator {
     expandedPaths: GraphRecallExpandedEntry[];
     seedResults: QmdSearchResult[];
   }> {
+    const deadlineExpired = (): boolean =>
+      typeof options.deadlineAtMs === "number" &&
+      Date.now() >= options.deadlineAtMs;
     const byNamespace = new Map<string, QmdSearchResult[]>();
-    for (const result of options.memoryResults) {
-      const ns = this.namespaceFromPath(result.path);
-      if (!options.recallNamespaces.includes(ns)) continue;
-      const existing = byNamespace.get(ns);
+    const addResultForNamespace = (
+      namespace: string,
+      result: QmdSearchResult,
+    ): void => {
+      const existing = byNamespace.get(namespace);
       if (existing) {
         existing.push(result);
       } else {
-        byNamespace.set(ns, [result]);
+        byNamespace.set(namespace, [result]);
       }
+    };
+    const resolvedAmbiguousSeeds = new Map<
+      string,
+      { namespace: string; result: QmdSearchResult } | null
+    >();
+    const resolveAmbiguousSeedOwner = async (
+      result: QmdSearchResult,
+      parts: { collection: string; relativePath: string } | null,
+    ): Promise<{ namespace: string; result: QmdSearchResult } | null> => {
+      const cached = resolvedAmbiguousSeeds.get(result.path);
+      if (cached !== undefined) return cached;
+      if (deadlineExpired()) {
+        resolvedAmbiguousSeeds.set(result.path, null);
+        return null;
+      }
+
+      let resolvedPath = result.path;
+      let resolvedResult = result;
+      if (parts) {
+        const resolvedCold = await this.resolveColdQmdResultForRecall(
+          result,
+          this.storage,
+          options.recallNamespaces,
+        );
+        if (!resolvedCold || deadlineExpired()) {
+          resolvedAmbiguousSeeds.set(result.path, null);
+          return null;
+        }
+        resolvedPath = resolvedCold.result.path;
+        resolvedResult = resolvedCold.result;
+      }
+
+      if (!path.isAbsolute(resolvedPath)) {
+        resolvedAmbiguousSeeds.set(result.path, null);
+        return null;
+      }
+      const ownerStorage = await this.storageForAbsoluteQmdResultPath(
+        resolvedPath,
+        this.storage,
+        options.recallNamespaces,
+      );
+      const ownerNamespace = ownerStorage?.namespace ?? null;
+      const resolved =
+        ownerNamespace && options.recallNamespaces.includes(ownerNamespace)
+          ? { namespace: ownerNamespace, result: resolvedResult }
+          : null;
+      resolvedAmbiguousSeeds.set(result.path, resolved);
+      return resolved;
+    };
+    const coldCollection = this.config.qmdColdCollection ?? "openclaw-engram-cold";
+    for (const result of options.memoryResults) {
+      if (deadlineExpired()) break;
+      const parts = qmdCollectionPathParts(result.path);
+      if (parts?.collection === coldCollection) {
+        const resolved = await resolveAmbiguousSeedOwner(result, parts);
+        if (resolved) {
+          addResultForNamespace(resolved.namespace, resolved.result);
+        }
+        continue;
+      }
+      if (path.isAbsolute(result.path)) {
+        const resolved = await resolveAmbiguousSeedOwner(result, null);
+        if (resolved) {
+          addResultForNamespace(resolved.namespace, resolved.result);
+        }
+        continue;
+      }
+      const ns = this.namespaceFromPath(result.path);
+      if (!options.recallNamespaces.includes(ns)) continue;
+      addResultForNamespace(ns, result);
     }
 
     const perNamespaceSeedCap = Math.max(3, options.recallResultLimit);
@@ -5967,15 +6093,31 @@ export class Orchestrator {
     const expandedResults: QmdSearchResult[] = [];
 
     for (const [namespace, nsResults] of byNamespace.entries()) {
+      if (deadlineExpired()) break;
       const storage = await this.storageRouter.storageFor(namespace);
       const seedCandidates = nsResults.slice(0, perNamespaceSeedCap);
       seedResults.push(...seedCandidates);
-      const seedRelativePaths = seedCandidates
-        .map((result) => graphPathRelativeToStorage(storage.dir, result.path))
-        .filter(
-          (value): value is string =>
-            typeof value === "string" && value.length > 0,
-        );
+      const seedRelativePaths =
+        typeof options.deadlineAtMs === "number"
+          ? await this.graphSeedPathsWithinDeadline(
+              storage,
+              seedCandidates,
+              options.deadlineAtMs,
+              [namespace],
+            )
+          : (
+              await Promise.all(
+                seedCandidates.map((result) =>
+                  this.graphSeedPathRelativeToStorage(storage, result, [
+                    namespace,
+                  ]),
+                ),
+              )
+            ).filter(
+              (value): value is string =>
+                typeof value === "string" && value.length > 0,
+            );
+      if (deadlineExpired()) break;
       if (seedRelativePaths.length === 0) continue;
 
       const seedRecallScore = seedCandidates.reduce(
@@ -5989,14 +6131,22 @@ export class Orchestrator {
       const expanded = await this.graphIndexFor(storage).spreadingActivation(
         seedRelativePaths,
         this.config.maxGraphTraversalSteps,
-        options.includeLowConfidence === true ? { includeLowConfidence: true } : undefined,
+        {
+          ...(options.includeLowConfidence === true ? { includeLowConfidence: true } : {}),
+          ...(typeof options.deadlineAtMs === "number"
+            ? { deadlineAtMs: options.deadlineAtMs }
+            : {}),
+        },
       );
       if (expanded.length === 0) continue;
+      if (deadlineExpired()) break;
 
       for (const candidate of expanded.slice(0, perNamespaceExpandedCap)) {
+        if (deadlineExpired()) break;
         if (seedSet.has(candidate.path)) continue;
         const memoryPath = path.resolve(storage.dir, candidate.path);
         const memory = await storage.readMemoryByPath(memoryPath);
+        if (deadlineExpired()) break;
         if (!memory) continue;
         if (isArtifactMemoryPath(memory.path)) continue;
         if (memory.frontmatter.status && memory.frontmatter.status !== "active")
@@ -8737,17 +8887,18 @@ export class Orchestrator {
     // several seconds on large box directories due to sequential I/O). We kick it
     // off here so it overlaps with QMD and other concurrent work rather than
     // running sequentially in phase-2 and blocking assembly.
-    const recentBoxesPromise: Promise<BoxFrontmatter[]> =
+    const recentBoxesPromise = observeEnrichmentPromise(
       this.isRecallSectionEnabled(
         "memory-boxes",
         this.config.memoryBoxesEnabled === true,
       ) &&
-      this.config.memoryBoxesEnabled &&
-      this.config.boxRecallDays > 0
+        this.config.memoryBoxesEnabled &&
+        this.config.boxRecallDays > 0
         ? this.boxBuilderFor(profileStorage)
             .readRecentBoxes(this.config.boxRecallDays)
             .catch(() => [] as BoxFrontmatter[])
-        : Promise.resolve([] as BoxFrontmatter[]);
+        : Promise.resolve([] as BoxFrontmatter[]),
+    );
 
     // --- Wait for core sections first, then bounded enrichment ---
     this.profiler.startSpan("phase-1-parallel", profileTraceId);
@@ -8929,6 +9080,70 @@ export class Orchestrator {
       }
 
       return finalizeEnrichmentOutcome(outcome);
+    };
+
+    const remainingEnrichmentAssemblyMs = (): number | null =>
+      enrichmentAssemblyDeadlineAtMs === null
+        ? null
+        : Math.max(0, enrichmentAssemblyDeadlineAtMs - Date.now());
+
+    const awaitAssemblyStep = async <T>(
+      name: string,
+      task: () => Promise<T>,
+      fallback: T,
+    ): Promise<T> => {
+      if (options.abortSignal?.aborted) {
+        log.debug(
+          `recall phase-1 assembly [${name}]: skipped after abort at +${Date.now() - phase1Start}ms`,
+        );
+        return fallback;
+      }
+
+      const timeoutMs = remainingEnrichmentAssemblyMs();
+      if (timeoutMs === 0) {
+        log.debug(
+          `recall phase-1 assembly [${name}]: skipped after shared ${enrichmentSectionDeadlineMs}ms budget expired ` +
+            `at +${Date.now() - phase1Start}ms`,
+        );
+        return fallback;
+      }
+
+      let timeoutHandle: NodeJS.Timeout | undefined;
+      try {
+        const result = await (timeoutMs !== null
+          ? Promise.race<T | { status: "timed_out" }>([
+              task(),
+              new Promise<{ status: "timed_out" }>((resolve) => {
+                timeoutHandle = setTimeout(
+                  () => resolve({ status: "timed_out" }),
+                  timeoutMs,
+                );
+              }),
+            ])
+          : task());
+        if (timeoutHandle) clearTimeout(timeoutHandle);
+        if (
+          typeof result === "object" &&
+          result !== null &&
+          "status" in result &&
+          (result as { status?: unknown }).status === "timed_out"
+        ) {
+          log.debug(
+            `recall phase-1 assembly [${name}]: timed out within shared ${enrichmentSectionDeadlineMs}ms budget ` +
+              `at +${Date.now() - phase1Start}ms`,
+          );
+          return fallback;
+        }
+        return result as T;
+      } catch (err) {
+        if (timeoutHandle) clearTimeout(timeoutHandle);
+        log.warn(
+          `recall phase-1 assembly [${name}] failed open: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+        return fallback;
+      }
     };
 
     // --- Phase 2: Assemble sections in correct order ---
@@ -9263,8 +9478,11 @@ export class Orchestrator {
     // 1d. Memory Boxes (topic continuity windows, v8.0 Phase 2A)
     // recentBoxesPromise was kicked off before phase-1 so it ran concurrently.
     {
-      const recentBoxes = await recentBoxesPromise;
-      if (recentBoxes.length > 0) {
+      const recentBoxes = await awaitEnrichmentSection(
+        "memory-boxes",
+        recentBoxesPromise,
+      );
+      if (recentBoxes && recentBoxes.length > 0) {
         const boxLines = recentBoxes.slice(0, 5).map((b: BoxFrontmatter) => {
           const sealedDate = b.sealedAt
             ? b.sealedAt.slice(0, 16).replace("T", " ")
@@ -9418,6 +9636,8 @@ export class Orchestrator {
     }
 
     // 2. QMD results — post-process and format
+    const qmdWasSettledBeforeAssemblyWait =
+      qmdPromise.getSettledOutcome() !== undefined;
     const qmdResult = await awaitEnrichmentSection("qmd", qmdPromise);
     if (qmdResult) {
       const t0 = Date.now();
@@ -9480,56 +9700,82 @@ export class Orchestrator {
           graphExpandedResultPaths.clear();
         } else {
           try {
-            const {
-              merged,
-              seedPaths,
-              expandedPaths,
-              seedResults = baselineMemoryResults,
-            } = await this.expandResultsViaGraph({
-              memoryResults,
-              recallNamespaces,
-              recallResultLimit,
-              ...(options.includeLowConfidence === true ? { includeLowConfidence: true } : {}),
-            });
-            graphSnapshotStatus = "completed";
-            graphDecisionStatus = "completed";
-            graphDecisionReason = graphShadowEvalEnabled
-              ? "graph shadow evaluation completed without altering injected context"
-              : "graph expansion merged into recall ranking";
-            graphSnapshotReason = graphDecisionReason;
-            graphSnapshotSeedPaths = seedPaths;
-            graphSnapshotExpandedPaths = expandedPaths;
-            graphSnapshotSeedResults = this.buildGraphRecallRankedResults(
-              seedResults,
-              () => ["baseline"],
+            const graphExpansion = await awaitAssemblyStep(
+              "graph-expansion",
+              () =>
+                this.expandResultsViaGraph({
+                  memoryResults,
+                  recallNamespaces,
+                  recallResultLimit,
+                  deadlineAtMs: enrichmentAssemblyDeadlineAtMs,
+                  ...(options.includeLowConfidence === true ? { includeLowConfidence: true } : {}),
+                }),
+              null as Awaited<ReturnType<typeof this.expandResultsViaGraph>> | null,
             );
-            graphExpandedResultPaths.clear();
-            expandedPaths.forEach((entry) =>
-              graphExpandedResultPaths.add(entry.path),
-            );
-            memoryResults = graphShadowEvalEnabled
-              ? baselineMemoryResults
-              : merged;
-
-            if (graphShadowEvalEnabled) {
-              const comparison = summarizeGraphShadowComparison(
+            if (!graphExpansion) {
+              graphSnapshotStatus = "aborted";
+              graphDecisionStatus = "aborted";
+              graphDecisionReason = options.abortSignal?.aborted
+                ? "graph expansion skipped because recall assembly was aborted"
+                : "graph expansion skipped because shared post-retrieval assembly budget expired";
+              graphSnapshotReason = graphDecisionReason;
+              graphSnapshotSeedPaths = baselineMemoryResults
+                .slice(0, Math.max(1, recallResultLimit))
+                .map((result) => result.path);
+              graphSnapshotSeedResults = this.buildGraphRecallRankedResults(
                 baselineMemoryResults,
-                merged,
-                recallResultLimit,
+                () => ["baseline"],
               );
-              graphSnapshotShadowComparison = comparison;
-              recordRecallSectionMetric({
-                section: "graphShadow",
-                priority: "enrichment",
-                durationMs: Date.now() - t0,
-                deadlineMs: enrichmentSectionDeadlineMs,
-                source: "fresh",
-                success: true,
-                timing:
-                  `on b=${comparison.baselineCount} g=${comparison.graphCount} ` +
-                  `ov=${comparison.overlapCount} (${comparison.overlapRatio.toFixed(2)}) ` +
-                  `avgDelta=${comparison.averageOverlapDelta.toFixed(3)}`,
-              });
+              graphSnapshotExpandedPaths = [];
+              graphExpandedResultPaths.clear();
+              memoryResults = baselineMemoryResults;
+            } else {
+              const {
+                merged,
+                seedPaths,
+                expandedPaths,
+                seedResults = baselineMemoryResults,
+              } = graphExpansion;
+              graphSnapshotStatus = "completed";
+              graphDecisionStatus = "completed";
+              graphDecisionReason = graphShadowEvalEnabled
+                ? "graph shadow evaluation completed without altering injected context"
+                : "graph expansion merged into recall ranking";
+              graphSnapshotReason = graphDecisionReason;
+              graphSnapshotSeedPaths = seedPaths;
+              graphSnapshotExpandedPaths = expandedPaths;
+              graphSnapshotSeedResults = this.buildGraphRecallRankedResults(
+                seedResults,
+                () => ["baseline"],
+              );
+              graphExpandedResultPaths.clear();
+              expandedPaths.forEach((entry) =>
+                graphExpandedResultPaths.add(entry.path),
+              );
+              memoryResults = graphShadowEvalEnabled
+                ? baselineMemoryResults
+                : merged;
+
+              if (graphShadowEvalEnabled) {
+                const comparison = summarizeGraphShadowComparison(
+                  baselineMemoryResults,
+                  merged,
+                  recallResultLimit,
+                );
+                graphSnapshotShadowComparison = comparison;
+                recordRecallSectionMetric({
+                  section: "graphShadow",
+                  priority: "enrichment",
+                  durationMs: Date.now() - t0,
+                  deadlineMs: enrichmentSectionDeadlineMs,
+                  source: "fresh",
+                  success: true,
+                  timing:
+                    `on b=${comparison.baselineCount} g=${comparison.graphCount} ` +
+                    `ov=${comparison.overlapCount} (${comparison.overlapRatio.toFixed(2)}) ` +
+                    `avgDelta=${comparison.averageOverlapDelta.toFixed(3)}`,
+                });
+              }
             }
           } catch (err) {
             graphSnapshotStatus = "aborted";
@@ -9551,13 +9797,41 @@ export class Orchestrator {
         }
       }
 
-      // Apply recency and access count boosting
-      memoryResults = await this.boostSearchResults(
+      // Apply mandatory recall safety filters before deadline-bound scoring
+      // enrichment. If scoring times out, we must fall back to this filtered
+      // list rather than raw QMD hits; boostSearchResults also removes
+      // forgotten, lifecycle-filtered, superseded/as_of-invalid, and
+      // dream/procedural memories.
+      const qmdBoostInput = await this.filterSearchResultsForRecall(
         memoryResults,
-        recallNamespaces,
-        retrievalQuery,
         undefined,
-        { asOfMs },
+        {
+          asOfMs,
+          // If QMD had already settled before the ordered assembly reached it,
+          // do not let unrelated slow enrichment turn those known results into
+          // unchecked misses. QMD that only settles during its own wait remains
+          // bounded by the shared post-retrieval assembly deadline.
+          deadlineAtMs: qmdWasSettledBeforeAssemblyWait
+            ? null
+            : enrichmentAssemblyDeadlineAtMs,
+          abortSignal: options.abortSignal,
+          dropUnresolved: true,
+          recallNamespaces,
+        },
+      );
+
+      // Apply recency and access count boosting
+      memoryResults = await awaitAssemblyStep(
+        "qmd-boost",
+        () =>
+          this.boostSearchResults(
+            qmdBoostInput.results,
+            recallNamespaces,
+            retrievalQuery,
+            qmdBoostInput.memoryByPath,
+            { asOfMs },
+          ),
+        qmdBoostInput.results,
       );
 
       // Optional LLM reranking (default off). Fail-open if rerank fails/slow.
@@ -9739,41 +10013,47 @@ export class Orchestrator {
         // low-relevance results from polluting context.
         const queryAwarePrefilter = await queryAwarePrefilterPromise;
         if (queryAwarePrefilter.candidatePaths?.size !== 0) {
-        const embeddingResults = await this.searchEmbeddingFallback(
-          retrievalQuery,
-          embeddingFetchLimit,
-        );
-        const prefilteredEmbeddingResults = applyQueryAwareCandidateFilter(
-          embeddingResults,
-          queryAwarePrefilter.candidatePaths,
-        );
-        const scopedCandidates = filterRecallCandidates(
-          prefilteredEmbeddingResults,
-          {
-            namespacesEnabled: this.config.namespacesEnabled,
-            recallNamespaces,
-            resolveNamespace: (p) => this.namespaceFromPath(p),
-            limit: embeddingFetchLimit,
+        const scoped = await awaitAssemblyStep(
+          "embedding-fallback",
+          async () => {
+            const embeddingResults = await this.searchEmbeddingFallback(
+              retrievalQuery,
+              embeddingFetchLimit,
+            );
+            const prefilteredEmbeddingResults = applyQueryAwareCandidateFilter(
+              embeddingResults,
+              queryAwarePrefilter.candidatePaths,
+            );
+            const scopedCandidates = filterRecallCandidates(
+              prefilteredEmbeddingResults,
+              {
+                namespacesEnabled: this.config.namespacesEnabled,
+                recallNamespaces,
+                resolveNamespace: (p) => this.namespaceFromPath(p),
+                limit: embeddingFetchLimit,
+              },
+            );
+            const boostedScoped = await this.boostSearchResults(
+              scopedCandidates,
+              recallNamespaces,
+              retrievalQuery,
+              undefined,
+              { asOfMs },
+            );
+            // MMR runs on the pre-truncation pool so diverse candidates just
+            // below the cutoff can be promoted into the injected set.
+            xrayBranchPoolSize.hot_embedding = Math.max(
+              xrayBranchPoolSize.hot_embedding,
+              boostedScoped.length,
+            );
+            return this.diversifyAndLimitRecallResults(
+              "memories",
+              boostedScoped,
+              recallResultLimit,
+              retrievalQuery,
+            );
           },
-        );
-        const boostedScoped = await this.boostSearchResults(
-          scopedCandidates,
-          recallNamespaces,
-          retrievalQuery,
-          undefined,
-          { asOfMs },
-        );
-        // MMR runs on the pre-truncation pool so diverse candidates just
-        // below the cutoff can be promoted into the injected set.
-        xrayBranchPoolSize.hot_embedding = Math.max(
-          xrayBranchPoolSize.hot_embedding,
-          boostedScoped.length,
-        );
-        const scoped = this.diversifyAndLimitRecallResults(
-          "memories",
-          boostedScoped,
-          recallResultLimit,
-          retrievalQuery,
+          [] as QmdSearchResult[],
         );
         if (scoped.length > 0) {
           if (shouldPersistGraphSnapshot) {
@@ -9811,6 +10091,7 @@ export class Orchestrator {
             queryAwarePrefilter,
             abortSignal: options.abortSignal,
             xrayPoolSizeSink: xrayColdPoolSink,
+            deadlineAtMs: enrichmentAssemblyDeadlineAtMs,
             asOfMs,
             ...(options.includeLowConfidence === true ? { includeLowConfidence: true } : {}),
           });
@@ -9886,42 +10167,48 @@ export class Orchestrator {
       // Fallback: embeddings first, then recency-only.
       const queryAwarePrefilter = await queryAwarePrefilterPromise;
       if (queryAwarePrefilter.candidatePaths?.size !== 0) {
-      const embeddingResults = await this.searchEmbeddingFallback(
-        retrievalQuery,
-        embeddingFetchLimit,
-      );
-      const prefilteredEmbeddingResults = applyQueryAwareCandidateFilter(
-        embeddingResults,
-        queryAwarePrefilter.candidatePaths,
-      );
-      const scopedCandidates = filterRecallCandidates(
-        prefilteredEmbeddingResults,
-        {
-          namespacesEnabled: this.config.namespacesEnabled,
-          recallNamespaces,
-          resolveNamespace: (p) => this.namespaceFromPath(p),
-          limit: embeddingFetchLimit,
-        },
-      );
-      const boostedScoped = await this.boostSearchResults(
-        scopedCandidates,
-        recallNamespaces,
-        retrievalQuery,
-        undefined,
-        { asOfMs },
-      );
-      // MMR runs on the pre-truncation pool so diverse candidates just
-      // below the cutoff can be promoted into the injected set.
-      xrayBranchPoolSize.hot_embedding = Math.max(
-        xrayBranchPoolSize.hot_embedding,
-        boostedScoped.length,
-      );
-      const scoped = this.diversifyAndLimitRecallResults(
-        "memories",
-        boostedScoped,
-        recallResultLimit,
-        retrievalQuery,
-      );
+        const scoped = await awaitAssemblyStep(
+          "embedding-fallback",
+          async () => {
+            const embeddingResults = await this.searchEmbeddingFallback(
+              retrievalQuery,
+              embeddingFetchLimit,
+            );
+            const prefilteredEmbeddingResults = applyQueryAwareCandidateFilter(
+              embeddingResults,
+              queryAwarePrefilter.candidatePaths,
+            );
+            const scopedCandidates = filterRecallCandidates(
+              prefilteredEmbeddingResults,
+              {
+                namespacesEnabled: this.config.namespacesEnabled,
+                recallNamespaces,
+                resolveNamespace: (p) => this.namespaceFromPath(p),
+                limit: embeddingFetchLimit,
+              },
+            );
+            const boostedScoped = await this.boostSearchResults(
+              scopedCandidates,
+              recallNamespaces,
+              retrievalQuery,
+              undefined,
+              { asOfMs },
+            );
+            // MMR runs on the pre-truncation pool so diverse candidates just
+            // below the cutoff can be promoted into the injected set.
+            xrayBranchPoolSize.hot_embedding = Math.max(
+              xrayBranchPoolSize.hot_embedding,
+              boostedScoped.length,
+            );
+            return this.diversifyAndLimitRecallResults(
+              "memories",
+              boostedScoped,
+              recallResultLimit,
+              retrievalQuery,
+            );
+          },
+          [] as QmdSearchResult[],
+        );
       if (scoped.length > 0) {
         if (shouldPersistGraphSnapshot) {
           graphSnapshotFinalResults = this.buildGraphRecallRankedResults(
@@ -9950,8 +10237,11 @@ export class Orchestrator {
         xrayRecalledResults = scoped;
         impressionRecorded = true;
       } else {
-        const memories =
-          await this.readAllMemoriesForNamespaces(recallNamespaces);
+        const memories = await awaitAssemblyStep(
+          "recent-memory-read",
+          () => this.readAllMemoriesForNamespaces(recallNamespaces),
+          [] as MemoryFile[],
+        );
         if (memories.length > 0) {
           // Filter out non-active memories.  Delegate to
           // shouldFilterSupersededFromRecall for superseded-status logic so
@@ -10023,6 +10313,7 @@ export class Orchestrator {
               queryAwarePrefilter,
               abortSignal: options.abortSignal,
               xrayPoolSizeSink: xrayColdPoolSink,
+              deadlineAtMs: enrichmentAssemblyDeadlineAtMs,
               asOfMs,
               ...(options.includeLowConfidence === true ? { includeLowConfidence: true } : {}),
             });
@@ -10049,44 +10340,50 @@ export class Orchestrator {
               impressionRecorded = true;
             }
           } else {
-            const recentSorted = queryAwareScopedMemories.sort(
-              (a, b) =>
-                new Date(b.frontmatter.updated).getTime() -
-                new Date(a.frontmatter.updated).getTime(),
-            );
-            const preloadedMap = new Map<string, MemoryFile>(
-              queryAwareScopedMemories
-                .filter((m) => m.path)
-                .map((m) => [m.path, m]),
-            );
-            const recentAsResults: QmdSearchResult[] = recentSorted.map(
-              (m, i) => ({
-                docid: m.frontmatter.id,
-                path: m.path,
-                snippet: m.content,
-                score: 1.0 - i / Math.max(recentSorted.length, 1),
-              }),
-            );
-            const boostedRecent = (
-              await this.boostSearchResults(
-                recentAsResults,
-                recallNamespaces,
-                retrievalQuery,
-                preloadedMap,
-                { asOfMs },
-              )
-            ).sort((a, b) => b.score - a.score);
-            // MMR runs on the pre-truncation pool so diverse candidates just
-            // below the cutoff can be promoted into the injected set.
-            xrayBranchPoolSize.recent_scan = Math.max(
-              xrayBranchPoolSize.recent_scan,
-              boostedRecent.length,
-            );
-            const recent = this.diversifyAndLimitRecallResults(
-              "memories",
-              boostedRecent,
-              recallResultLimit,
-              retrievalQuery,
+            const recent = await awaitAssemblyStep(
+              "recent-memory-scan",
+              async () => {
+                const recentSorted = queryAwareScopedMemories.sort(
+                  (a, b) =>
+                    new Date(b.frontmatter.updated).getTime() -
+                    new Date(a.frontmatter.updated).getTime(),
+                );
+                const preloadedMap = new Map<string, MemoryFile>(
+                  queryAwareScopedMemories
+                    .filter((m) => m.path)
+                    .map((m) => [m.path, m]),
+                );
+                const recentAsResults: QmdSearchResult[] = recentSorted.map(
+                  (m, i) => ({
+                    docid: m.frontmatter.id,
+                    path: m.path,
+                    snippet: m.content,
+                    score: 1.0 - i / Math.max(recentSorted.length, 1),
+                  }),
+                );
+                const boostedRecent = (
+                  await this.boostSearchResults(
+                    recentAsResults,
+                    recallNamespaces,
+                    retrievalQuery,
+                    preloadedMap,
+                    { asOfMs },
+                  )
+                ).sort((a, b) => b.score - a.score);
+                // MMR runs on the pre-truncation pool so diverse candidates just
+                // below the cutoff can be promoted into the injected set.
+                xrayBranchPoolSize.recent_scan = Math.max(
+                  xrayBranchPoolSize.recent_scan,
+                  boostedRecent.length,
+                );
+                return this.diversifyAndLimitRecallResults(
+                  "memories",
+                  boostedRecent,
+                  recallResultLimit,
+                  retrievalQuery,
+                );
+              },
+              [] as QmdSearchResult[],
             );
 
             if (recent.length > 0) {
@@ -10125,6 +10422,7 @@ export class Orchestrator {
                 queryAwarePrefilter,
                 abortSignal: options.abortSignal,
                 xrayPoolSizeSink: xrayColdPoolSink,
+                deadlineAtMs: enrichmentAssemblyDeadlineAtMs,
                 asOfMs,
                 ...(options.includeLowConfidence === true ? { includeLowConfidence: true } : {}),
               });
@@ -10168,6 +10466,7 @@ export class Orchestrator {
             queryAwarePrefilter,
             abortSignal: options.abortSignal,
             xrayPoolSizeSink: xrayColdPoolSink,
+            deadlineAtMs: enrichmentAssemblyDeadlineAtMs,
             asOfMs,
             ...(options.includeLowConfidence === true ? { includeLowConfidence: true } : {}),
           });
@@ -10547,6 +10846,7 @@ export class Orchestrator {
           query: retrievalQuery,
           memoryIds: recalledMemoryIds,
           namespace: selfNamespace,
+          recallNamespaces,
           traceId,
           plannerMode: recallMode,
           requestedMode,
@@ -15482,6 +15782,277 @@ export class Orchestrator {
    *
    * Callers must pass the full candidate pool (post-rerank, pre-slice).
    */
+  private qmdCollectionNamespaceFromPrefix(collectionPrefix: string): string | null {
+    const baseCollection = this.config.qmdCollection;
+    if (collectionPrefix === baseCollection) return this.config.defaultNamespace;
+    const namespaceSuffix = collectionPrefix.startsWith(`${baseCollection}--`)
+      ? collectionPrefix.slice(baseCollection.length + 2)
+      : "";
+    if (!namespaceSuffix) return null;
+
+    const decoded = namespaceIdentityFromToken(namespaceSuffix);
+    if (decoded !== null) return decoded || this.config.defaultNamespace;
+    if (namespaceSuffix.startsWith("ns--")) {
+      const legacyNamespace = namespaceSuffix.slice("ns--".length).trim();
+      return legacyNamespace || null;
+    }
+    return null;
+  }
+
+  private async readQmdResultMemory(
+    resultPath: string,
+    fallbackStorage: StorageManager,
+    recallNamespaces: readonly string[] = [],
+  ): Promise<MemoryFile | null> {
+    const parts = qmdCollectionPathParts(resultPath);
+    const storageDirFor = (storage: StorageManager): string | null =>
+      typeof (storage as { dir?: unknown }).dir === "string" &&
+      (storage as { dir?: string }).dir
+        ? (storage as { dir: string }).dir
+        : null;
+    const fallbackStorageDir = storageDirFor(fallbackStorage);
+    const coldCollection = this.config.qmdColdCollection ?? "openclaw-engram-cold";
+    if (parts && parts.collection === coldCollection) {
+      const storages: StorageManager[] = [];
+      const seenStorageDirs = new Set<string>();
+      const addStorage = (storage: StorageManager): void => {
+        const storageDir = storageDirFor(storage);
+        const storageKey = storageDir
+          ? path.resolve(storageDir)
+          : `storage-without-dir-${storages.length}`;
+        if (seenStorageDirs.has(storageKey)) return;
+        seenStorageDirs.add(storageKey);
+        storages.push(storage);
+      };
+
+      const fallbackNamespace =
+        fallbackStorageDir !== null
+          ? this.namespaceFromStorageDir(fallbackStorageDir)
+          : this.config.defaultNamespace;
+      if (
+        recallNamespaces.length === 0 ||
+        !this.config.namespacesEnabled ||
+        recallNamespaces.includes(fallbackNamespace)
+      ) {
+        addStorage(fallbackStorage);
+      }
+
+      if (recallNamespaces.length > 0) {
+        for (const namespace of recallNamespaces) {
+          try {
+            addStorage(await this.storageRouter.storageFor(namespace));
+          } catch (err) {
+            log.debug("qmd cold result namespace storage lookup skipped", {
+              path: resultPath,
+              namespace,
+              error: (err as Error).message,
+            });
+          }
+        }
+      }
+
+      for (const storage of storages) {
+        const storageDir = storageDirFor(storage);
+        if (!storageDir) {
+          const memory = await storage.readMemoryByPath(resultPath);
+          if (memory) return memory;
+          continue;
+        }
+        try {
+          const coldRoot = path.join(storageDir, "cold");
+          for (const candidate of qmdResultPathCandidates(
+            coldRoot,
+            parts.relativePath,
+          )) {
+            const memory = await storage.readMemoryByPath(candidate);
+            if (memory) return memory;
+          }
+        } catch (err) {
+          if (err instanceof SecureStoreLockedError) throw err;
+          log.debug("qmd cold result path lookup failed open", {
+            path: resultPath,
+            collection: coldCollection,
+            error: (err as Error).message,
+          });
+        }
+      }
+      return null;
+    }
+    const collectionNamespace = parts
+      ? this.qmdCollectionNamespaceFromPrefix(parts.collection)
+      : null;
+
+    if (parts && collectionNamespace) {
+      try {
+        const collectionStorage =
+          await this.storageRouter.storageFor(collectionNamespace);
+        for (const candidate of qmdResultPathCandidates(
+          collectionStorage.dir,
+          parts.relativePath,
+        )) {
+          const memory = await collectionStorage.readMemoryByPath(candidate);
+          if (memory) return memory;
+        }
+        return null;
+      } catch (err) {
+        if (err instanceof SecureStoreLockedError) throw err;
+        log.debug("qmd result namespace path lookup failed open", {
+          path: resultPath,
+          namespace: collectionNamespace,
+          error: (err as Error).message,
+        });
+        return null;
+      }
+    }
+
+    if (path.isAbsolute(resultPath)) {
+      if (!fallbackStorageDir) {
+        return await fallbackStorage.readMemoryByPath(resultPath);
+      }
+      const ownerStorage = await this.storageForAbsoluteQmdResultPath(
+        resultPath,
+        fallbackStorage,
+        recallNamespaces,
+      );
+      if (!ownerStorage) return null;
+      for (const candidate of qmdResultPathCandidates(
+        ownerStorage.dir,
+        resultPath,
+      )) {
+        const memory = await ownerStorage.storage.readMemoryByPath(candidate);
+        if (memory) return memory;
+      }
+      return null;
+    }
+
+    if (!fallbackStorageDir) {
+      return await fallbackStorage.readMemoryByPath(resultPath);
+    }
+    for (const candidate of qmdResultPathCandidates(
+      fallbackStorageDir,
+      resultPath,
+    )) {
+      const memory = await fallbackStorage.readMemoryByPath(candidate);
+      if (memory) return memory;
+    }
+    return null;
+  }
+
+  private async resolveColdQmdResultForRecall(
+    result: QmdSearchResult,
+    fallbackStorage: StorageManager,
+    recallNamespaces: readonly string[] = [],
+  ): Promise<{ namespace: string; result: QmdSearchResult } | null> {
+    const memory = await this.readQmdResultMemory(
+      result.path,
+      fallbackStorage,
+      recallNamespaces,
+    );
+    if (!memory) return null;
+
+    let ownerNamespace: string | null = null;
+    if (path.isAbsolute(memory.path)) {
+      const ownerStorage = await this.storageForAbsoluteQmdResultPath(
+        memory.path,
+        fallbackStorage,
+        recallNamespaces,
+      );
+      ownerNamespace = ownerStorage?.namespace ?? null;
+      if (!ownerNamespace && this.config.namespacesEnabled) return null;
+    }
+    ownerNamespace ??= this.namespaceFromPath(memory.path);
+    if (
+      recallNamespaces.length > 0 &&
+      !recallNamespaces.includes(ownerNamespace)
+    ) {
+      return null;
+    }
+
+    return {
+      namespace: ownerNamespace,
+      result: {
+        ...result,
+        docid: result.docid || memory.frontmatter.id,
+        path: memory.path,
+        snippet: result.snippet || memory.content.slice(0, 400),
+      },
+    };
+  }
+
+  private async storageForAbsoluteQmdResultPath(
+    resultPath: string,
+    fallbackStorage: StorageManager,
+    recallNamespaces: readonly string[] = [],
+  ): Promise<{ storage: StorageManager; dir: string; namespace: string } | null> {
+    const resolvedPath = path.resolve(resultPath);
+    const memoryRoot = path.resolve(this.config.memoryDir);
+    const namespacesRoot = path.join(memoryRoot, "namespaces");
+    const fallbackStorageDir =
+      typeof (fallbackStorage as { dir?: unknown }).dir === "string" &&
+      (fallbackStorage as { dir?: string }).dir
+        ? (fallbackStorage as { dir: string }).dir
+        : null;
+    const matches: Array<{ storage: StorageManager; dir: string; namespace: string }> = [];
+    const seenDirs = new Set<string>();
+
+    const maybeAddStorage = (storage: StorageManager, namespace: string) => {
+      const storageDir =
+        typeof (storage as { dir?: unknown }).dir === "string" &&
+        (storage as { dir?: string }).dir
+          ? (storage as { dir: string }).dir
+          : null;
+      if (!storageDir) return;
+      const candidateRoot = path.resolve(storageDir);
+      if (seenDirs.has(candidateRoot)) return;
+      if (!isPathInsideStorageRoot(candidateRoot, resolvedPath)) return;
+      if (
+        candidateRoot === memoryRoot &&
+        isPathInsideStorageRoot(namespacesRoot, resolvedPath)
+      ) {
+        return;
+      }
+      seenDirs.add(candidateRoot);
+      matches.push({ storage, dir: candidateRoot, namespace });
+    };
+
+    const fallbackNamespace =
+      fallbackStorageDir !== null
+        ? this.namespaceFromStorageDir(fallbackStorageDir)
+        : this.config.defaultNamespace;
+    maybeAddStorage(fallbackStorage, fallbackNamespace);
+
+    const candidateNamespaces = new Set<string>();
+    candidateNamespaces.add(this.config.defaultNamespace);
+    candidateNamespaces.add(this.config.sharedNamespace);
+    for (const ns of recallNamespaces) {
+      candidateNamespaces.add(ns);
+    }
+    if (isPathInsideStorageRoot(namespacesRoot, resolvedPath)) {
+      const relativeToNamespaces = path.relative(namespacesRoot, resolvedPath);
+      const [namespaceSegment] = relativeToNamespaces.split(/[\\/]/);
+      if (namespaceSegment) {
+        candidateNamespaces.add(
+          namespaceIdentityFromToken(namespaceSegment) ?? namespaceSegment,
+        );
+      }
+    }
+    for (const policy of this.config.namespacePolicies ?? []) {
+      candidateNamespaces.add(policy.name);
+    }
+
+    for (const ns of candidateNamespaces) {
+      if (!ns) continue;
+      try {
+        maybeAddStorage(await this.storageRouter.storageFor(ns), ns);
+      } catch {
+        continue;
+      }
+    }
+
+    matches.sort((a, b) => b.dir.length - a.dir.length);
+    return matches[0] ?? null;
+  }
+
   private async applyMemoryWorthRerank(
     results: QmdSearchResult[],
     namespaces: string[],
@@ -15557,7 +16128,7 @@ export class Orchestrator {
       if (reader) {
         for (const r of missing) {
           try {
-            const memory = await reader.readMemoryByPath(r.path);
+            const memory = await this.readQmdResultMemory(r.path, reader, namespaces);
             if (!memory) continue;
             const fm = memory.frontmatter;
             if (fm.mw_success === undefined && fm.mw_fail === undefined) continue;
@@ -15973,6 +16544,7 @@ export class Orchestrator {
      * Unset by default so existing call sites are unaffected.
      */
     xrayPoolSizeSink?: { size: number };
+    deadlineAtMs?: number | null;
     /** Issue #681 — when true, bypass graphTraversalConfidenceFloor. */
     includeLowConfidence?: boolean;
   }): Promise<QmdSearchResult[]> {
@@ -15980,6 +16552,50 @@ export class Orchestrator {
       if (options.xrayPoolSizeSink) options.xrayPoolSizeSink.size = 0;
       return [];
     }
+    const deadlineRemainingMs = (): number | null =>
+      typeof options.deadlineAtMs === "number"
+        ? Math.max(0, options.deadlineAtMs - Date.now())
+        : null;
+    const runColdStepWithinDeadline = async <T>(
+      label: string,
+      fallback: T,
+      task: () => Promise<T>,
+    ): Promise<T> => {
+      throwIfRecallAborted(options.abortSignal);
+      const remainingMs = deadlineRemainingMs();
+      if (remainingMs === 0) {
+        log.debug(`cold-tier recall ${label} skipped: shared assembly deadline expired`);
+        return fallback;
+      }
+      if (remainingMs === null) return task();
+
+      let timeoutHandle: NodeJS.Timeout | undefined;
+      let timedOut = false;
+      const taskPromise = task().catch((err) => {
+        if (timedOut) {
+          log.debug(`cold-tier recall ${label} failed after deadline: ${err}`);
+          return fallback;
+        }
+        throw err;
+      });
+
+      try {
+        return await Promise.race<T>([
+          taskPromise,
+          new Promise<T>((resolve) => {
+            timeoutHandle = setTimeout(() => {
+              timedOut = true;
+              log.debug(
+                `cold-tier recall ${label} skipped: shared assembly deadline expired`,
+              );
+              resolve(fallback);
+            }, remainingMs);
+          }),
+        ]);
+      } finally {
+        if (timeoutHandle) clearTimeout(timeoutHandle);
+      }
+    };
 
     const coldQmdEnabled = this.config.qmdColdTierEnabled === true;
     const coldCollection =
@@ -15999,19 +16615,24 @@ export class Orchestrator {
           false,
           0,
         );
-        longTerm = await this.fetchQmdMemoryResultsWithArtifactTopUp(
-          options.prompt,
-          coldFetchLimit,
-          coldHybridLimit,
-          {
-            namespacesEnabled: this.config.namespacesEnabled,
-            recallNamespaces: options.recallNamespaces,
-            resolveNamespace: (p) => this.namespaceFromPath(p),
-            collection: coldCollection,
-            queryAwarePrefilter: options.queryAwarePrefilter,
-            searchOptions: this.buildConfiguredQmdSearchOptions(options.prompt),
-            abortSignal: options.abortSignal,
-          },
+        longTerm = await runColdStepWithinDeadline(
+          "qmd lookup",
+          [],
+          () =>
+            this.fetchQmdMemoryResultsWithArtifactTopUp(
+              options.prompt,
+              coldFetchLimit,
+              coldHybridLimit,
+              {
+                namespacesEnabled: this.config.namespacesEnabled,
+                recallNamespaces: options.recallNamespaces,
+                resolveNamespace: (p) => this.namespaceFromPath(p),
+                collection: coldCollection,
+                queryAwarePrefilter: options.queryAwarePrefilter,
+                searchOptions: this.buildConfiguredQmdSearchOptions(options.prompt),
+                abortSignal: options.abortSignal,
+              },
+            ),
         );
         if (longTerm.length > 0) {
           log.debug(
@@ -16021,12 +16642,17 @@ export class Orchestrator {
       }
     }
     if (longTerm.length === 0) {
-      longTerm = await this.searchLongTermArchiveFallback(
-        options.prompt,
-        options.recallNamespaces,
-        options.recallResultLimit,
-        options.queryAwarePrefilter,
-        options.abortSignal,
+      longTerm = await runColdStepWithinDeadline(
+        "archive scan",
+        [],
+        () =>
+          this.searchLongTermArchiveFallback(
+            options.prompt,
+            options.recallNamespaces,
+            options.recallResultLimit,
+            options.queryAwarePrefilter,
+            options.abortSignal,
+          ),
       );
       if (longTerm.length > 0) {
         log.debug("cold-tier recall source=archive-scan");
@@ -16036,9 +16662,57 @@ export class Orchestrator {
 
     let results = longTerm;
     if (this.config.namespacesEnabled) {
-      results = results.filter((r) =>
-        options.recallNamespaces.includes(this.namespaceFromPath(r.path)),
-      );
+      const recallRoots: string[] = [];
+      const seenRecallRoots = new Set<string>();
+      for (const namespace of options.recallNamespaces) {
+        try {
+          const storage = await this.storageRouter.storageFor(namespace);
+          const storageDir =
+            typeof (storage as { dir?: unknown }).dir === "string" &&
+            (storage as { dir?: string }).dir
+              ? (storage as { dir: string }).dir
+              : null;
+          if (!storageDir) continue;
+          const recallRoot = path.resolve(storageDir);
+          if (seenRecallRoots.has(recallRoot)) continue;
+          seenRecallRoots.add(recallRoot);
+          recallRoots.push(recallRoot);
+        } catch (err) {
+          log.debug("cold-tier recall namespace root lookup skipped", {
+            namespace,
+            error: (err as Error).message,
+          });
+        }
+      }
+      const scopedResults: QmdSearchResult[] = [];
+      for (const result of results) {
+        if (options.abortSignal?.aborted || deadlineRemainingMs() === 0) break;
+        const parts = qmdCollectionPathParts(result.path);
+        if (parts?.collection === coldCollection) {
+          const resolvedCold = await this.resolveColdQmdResultForRecall(
+            result,
+            this.storage,
+            options.recallNamespaces,
+          );
+          if (resolvedCold) scopedResults.push(resolvedCold.result);
+          continue;
+        }
+        if (path.isAbsolute(result.path)) {
+          const resolvedPath = path.resolve(result.path);
+          if (
+            recallRoots.some((recallRoot) =>
+              isPathInsideStorageRoot(recallRoot, resolvedPath),
+            )
+          ) {
+            scopedResults.push(result);
+          }
+          continue;
+        }
+        if (options.recallNamespaces.includes(this.namespaceFromPath(result.path))) {
+          scopedResults.push(result);
+        }
+      }
+      results = scopedResults;
     }
     // Artifact isolation contract: generic recall paths must exclude artifacts.
     results = results.filter((r) => !isArtifactMemoryPath(r.path));
@@ -16059,18 +16733,75 @@ export class Orchestrator {
         memoryResults: results,
         recallNamespaces: options.recallNamespaces,
         recallResultLimit: options.recallResultLimit,
+        deadlineAtMs: options.deadlineAtMs,
         ...(options.includeLowConfidence === true ? { includeLowConfidence: true } : {}),
       });
       results = merged;
     }
 
-    results = await this.boostSearchResults(
+    const boostInput = await this.filterSearchResultsForRecall(
       results,
-      options.recallNamespaces,
-      options.prompt,
       undefined,
-      { allowLifecycleFiltered: true, asOfMs: options.asOfMs },
+      {
+        allowLifecycleFiltered: true,
+        asOfMs: options.asOfMs,
+        deadlineAtMs: options.deadlineAtMs,
+        abortSignal: options.abortSignal,
+        dropUnresolved: true,
+        recallNamespaces: options.recallNamespaces,
+      },
     );
+    results = boostInput.results;
+    const boostTimeoutMs =
+      typeof options.deadlineAtMs === "number"
+        ? Math.max(0, options.deadlineAtMs - Date.now())
+        : null;
+    if (boostTimeoutMs !== 0) {
+      let timeoutHandle: NodeJS.Timeout | undefined;
+      try {
+        const boosted = await (boostTimeoutMs !== null
+          ? Promise.race<QmdSearchResult[] | { status: "timed_out" }>([
+              this.boostSearchResults(
+                boostInput.results,
+                options.recallNamespaces,
+                options.prompt,
+                boostInput.memoryByPath,
+                { allowLifecycleFiltered: true, asOfMs: options.asOfMs },
+              ),
+              new Promise<{ status: "timed_out" }>((resolve) => {
+                timeoutHandle = setTimeout(
+                  () => resolve({ status: "timed_out" }),
+                  boostTimeoutMs,
+                );
+              }),
+            ])
+          : this.boostSearchResults(
+              boostInput.results,
+              options.recallNamespaces,
+              options.prompt,
+              boostInput.memoryByPath,
+              { allowLifecycleFiltered: true, asOfMs: options.asOfMs },
+            ));
+        if (
+          typeof boosted === "object" &&
+          boosted !== null &&
+          "status" in boosted &&
+          boosted.status === "timed_out"
+        ) {
+          log.debug("cold-tier recall boost skipped: shared assembly deadline expired");
+        } else if (Array.isArray(boosted)) {
+          results = boosted;
+        } else {
+          results = boostInput.results;
+        }
+      } catch (err) {
+        log.debug(`cold-tier recall boost failed open: ${err}`);
+      } finally {
+        if (timeoutHandle) clearTimeout(timeoutHandle);
+      }
+    } else {
+      log.debug("cold-tier recall boost skipped: shared assembly deadline already expired");
+    }
 
     if (this.config.rerankEnabled && this.config.rerankProvider === "local") {
       const ranked = await rerankLocalOrNoop({
@@ -16218,104 +16949,133 @@ export class Orchestrator {
     log.debug(`flushed ${entries.length} access tracking entries`);
   }
 
-  /**
-   * Apply recency, access count, and importance boosting to QMD search results.
-   * Returns re-ranked results.
-   */
-  private async boostSearchResults(
+  private async loadSearchResultMemoryMap(
     results: QmdSearchResult[],
-    _recallNamespaces: string[],
-    prompt?: string,
     preloadedMemoryMap?: Map<string, MemoryFile>,
     options?: {
-      allowLifecycleFiltered?: boolean;
-      allowDedicatedSurface?: boolean;
-      /**
-       * Historical recall point in ms-since-epoch (issue #680).  When
-       * set, drops candidates that were not authoritative at this
-       * instant per `temporal-validity.isValidAsOf`.  Caller is
-       * responsible for parsing/validating the user-supplied ISO
-       * string at the input boundary (CLI / HTTP / MCP).
-       */
-      asOfMs?: number;
+      deadlineAtMs?: number | null;
+      abortSignal?: AbortSignal;
+      recallNamespaces?: readonly string[];
     },
-  ): Promise<QmdSearchResult[]> {
-    if (results.length === 0) return results;
-
-    const now = Date.now();
-    // Seed with any pre-loaded memories (e.g. from the recency fallback path)
-    // to avoid redundant disk reads for files already in memory.
+  ): Promise<{
+    memoryByPath: Map<string, MemoryFile>;
+    checkedPaths: Set<string>;
+    unreadablePaths: Set<string>;
+    completed: boolean;
+  }> {
     const memoryByPath: Map<string, MemoryFile> = preloadedMemoryMap
       ? new Map(preloadedMemoryMap)
       : new Map();
+    const checkedPaths = new Set<string>();
+    const unreadablePaths = new Set<string>();
 
-    // Determine temporal/tag query params before I/O (pure computation).
-    const resultPaths = new Set(
-      results.map((r) => r.path).filter(Boolean) as string[],
-    );
-    let temporalFromDate: string | null = null;
-    let promptTags: string[] = [];
-    if (this.config.queryAwareIndexingEnabled && prompt) {
-      if (isTemporalQuery(prompt)) {
-        temporalFromDate = recencyWindowFromPrompt(prompt, now);
+    const markChecked = (result: QmdSearchResult): void => {
+      if (result.path) checkedPaths.add(result.path);
+    };
+    const markUnreadable = (result: QmdSearchResult, err: unknown): void => {
+      if (!result.path) return;
+      checkedPaths.add(result.path);
+      unreadablePaths.add(result.path);
+      log.warn("recall safety filter dropped unreadable secure-store candidate", {
+        path: result.path,
+        error: (err as Error).message,
+      });
+    };
+    const deadlineExpired = (): boolean =>
+      typeof options?.deadlineAtMs === "number" &&
+      Date.now() >= options.deadlineAtMs;
+
+    if (options?.deadlineAtMs == null) {
+      const batchSize = options?.abortSignal ? 16 : results.length;
+      for (let offset = 0; offset < results.length; offset += batchSize) {
+        if (options?.abortSignal?.aborted) {
+          return {
+            memoryByPath,
+            checkedPaths,
+            unreadablePaths,
+            completed: false,
+          };
+        }
+        await Promise.all(
+          results.slice(offset, offset + batchSize).map(async (r) => {
+            if (!r.path) return;
+            if (memoryByPath.has(r.path)) {
+              markChecked(r);
+              return;
+            }
+            try {
+              const mem = await this.readQmdResultMemory(
+                r.path,
+                this.storage,
+                options?.recallNamespaces,
+              );
+              markChecked(r);
+              if (mem) memoryByPath.set(r.path, mem);
+            } catch (err) {
+              if (err instanceof SecureStoreLockedError) {
+                markUnreadable(r, err);
+                return;
+              }
+              throw err;
+            }
+          }),
+        );
       }
-      promptTags = extractTagsFromPrompt(prompt);
+
+      return { memoryByPath, checkedPaths, unreadablePaths, completed: true };
     }
 
-    // Run all file I/O in parallel: memory files not yet preloaded + index files.
-    const [, rawTemporal, rawTags] = await Promise.all([
-      Promise.all(
-        results.map(async (r) => {
-          if (!r.path || memoryByPath.has(r.path)) return;
-          const mem = await this.storage.readMemoryByPath(r.path);
-          if (mem) memoryByPath.set(r.path, mem);
-        }),
-      ),
-      temporalFromDate !== null
-        ? queryByDateRangeAsync(this.config.memoryDir, temporalFromDate)
-        : Promise.resolve<Set<string> | null>(null),
-      promptTags.length > 0
-        ? queryByTagsAsync(this.config.memoryDir, promptTags)
-        : Promise.resolve<Set<string> | null>(null),
-    ]);
-
-    const queryIntent =
-      this.config.intentRoutingEnabled && prompt
-        ? inferIntentFromText(prompt)
-        : null;
-
-    // v8.1: Temporal + Tag prefilter candidate set
-    // Scope to result paths first so cross-namespace paths don't consume the cap.
-    let temporalCandidates: Set<string> | null = null;
-    let tagCandidates: Set<string> | null = null;
-    if (this.config.queryAwareIndexingEnabled && prompt) {
-      const maxCandidates = this.config.queryAwareIndexingMaxCandidates;
-      const capSet = (s: Set<string> | null): Set<string> | null => {
-        if (!s) return null;
-        // Intersect with result paths first so out-of-scope paths don't exhaust the budget
-        const scoped = new Set(Array.from(s).filter((p) => resultPaths.has(p)));
-        if (maxCandidates === 0 || scoped.size <= maxCandidates)
-          return scoped;
-        return new Set(Array.from(scoped).slice(0, maxCandidates));
-      };
-      if (temporalFromDate !== null) {
-        temporalCandidates = capSet(rawTemporal);
+    for (const result of results) {
+      if (!result.path) continue;
+      if (memoryByPath.has(result.path)) {
+        markChecked(result);
+        continue;
       }
-      if (promptTags.length > 0) {
-        tagCandidates = capSet(rawTags);
+      if (options?.abortSignal?.aborted || deadlineExpired()) {
+        return { memoryByPath, checkedPaths, unreadablePaths, completed: false };
+      }
+      try {
+        const mem = await this.readQmdResultMemory(
+          result.path,
+          this.storage,
+          options?.recallNamespaces,
+        );
+        markChecked(result);
+        if (mem) memoryByPath.set(result.path, mem);
+      } catch (err) {
+        if (err instanceof SecureStoreLockedError) {
+          markUnreadable(result, err);
+          continue;
+        }
+        throw err;
       }
     }
 
+    return { memoryByPath, checkedPaths, unreadablePaths, completed: true };
+  }
+
+  private filterSearchResultsByRecallSafety(
+    results: QmdSearchResult[],
+    memoryByPath: Map<string, MemoryFile>,
+    options?: {
+      allowLifecycleFiltered?: boolean;
+      allowDedicatedSurface?: boolean;
+      asOfMs?: number;
+      blockedPaths?: Set<string>;
+    },
+  ): QmdSearchResult[] {
     let lifecycleFilteredCount = 0;
     let temporalSupersededFilteredCount = 0;
     let dedicatedSurfaceFilteredCount = 0;
     let forgottenFilteredCount = 0;
-    const boosted: QmdSearchResult[] = [];
-    const recencyWeight = this.effectiveRecencyWeight();
+    let blockedPathFilteredCount = 0;
+    const filtered: QmdSearchResult[] = [];
     for (const r of results) {
+      if (r.path && options?.blockedPaths?.has(r.path)) {
+        blockedPathFilteredCount += 1;
+        continue;
+      }
       const memory = memoryByPath.get(r.path);
-      let score = r.score;
-
       if (memory) {
         if (memory.frontmatter.status === "forgotten") {
           forgottenFilteredCount += 1;
@@ -16377,7 +17137,178 @@ export class Orchestrator {
           dedicatedSurfaceFilteredCount += 1;
           continue;
         }
+      }
+      filtered.push(r);
+    }
+    if (lifecycleFilteredCount > 0) {
+      log.debug(
+        `lifecycle retrieval filter removed ${lifecycleFilteredCount} stale/archived candidates`,
+      );
+    }
+    if (temporalSupersededFilteredCount > 0) {
+      log.debug(
+        `temporal supersession filter removed ${temporalSupersededFilteredCount} superseded candidates`,
+      );
+    }
+    if (dedicatedSurfaceFilteredCount > 0) {
+      log.debug(
+        `dedicated surface filter removed ${dedicatedSurfaceFilteredCount} dream/procedural candidates from generic recall`,
+      );
+    }
+    if (forgottenFilteredCount > 0) {
+      log.debug(
+        `forgotten status filter removed ${forgottenFilteredCount} candidates from recall`,
+      );
+    }
+    if (blockedPathFilteredCount > 0) {
+      log.debug(
+        `unreadable-path filter removed ${blockedPathFilteredCount} candidates from recall`,
+      );
+    }
+    return filtered;
+  }
 
+  private async filterSearchResultsForRecall(
+    results: QmdSearchResult[],
+    preloadedMemoryMap?: Map<string, MemoryFile>,
+    options?: {
+      allowLifecycleFiltered?: boolean;
+      allowDedicatedSurface?: boolean;
+      asOfMs?: number;
+      deadlineAtMs?: number | null;
+      abortSignal?: AbortSignal;
+      dropUnresolved?: boolean;
+      recallNamespaces?: readonly string[];
+    },
+  ): Promise<{ results: QmdSearchResult[]; memoryByPath: Map<string, MemoryFile> }> {
+    if (results.length === 0) {
+      return {
+        results,
+        memoryByPath: preloadedMemoryMap ? new Map(preloadedMemoryMap) : new Map(),
+      };
+    }
+    const loaded = await this.loadSearchResultMemoryMap(
+      results,
+      preloadedMemoryMap,
+      options,
+    );
+    const candidateResults = loaded.completed
+      ? results
+      : results.filter((result) => !result.path || loaded.checkedPaths.has(result.path));
+    if (!loaded.completed) {
+      log.debug(
+        `recall safety filter stopped before validating all candidates (${candidateResults.length}/${results.length} eligible)`,
+      );
+    }
+    const blockedPaths = new Set(loaded.unreadablePaths);
+    if (options?.dropUnresolved === true) {
+      for (const resultPath of loaded.checkedPaths) {
+        if (!loaded.memoryByPath.has(resultPath)) {
+          blockedPaths.add(resultPath);
+        }
+      }
+    }
+    return {
+      results: this.filterSearchResultsByRecallSafety(
+        candidateResults,
+        loaded.memoryByPath,
+        { ...options, blockedPaths },
+      ),
+      memoryByPath: loaded.memoryByPath,
+    };
+  }
+
+  /**
+   * Apply recency, access count, and importance boosting to QMD search results.
+   * Returns re-ranked results.
+   */
+  private async boostSearchResults(
+    results: QmdSearchResult[],
+    _recallNamespaces: string[],
+    prompt?: string,
+    preloadedMemoryMap?: Map<string, MemoryFile>,
+    options?: {
+      allowLifecycleFiltered?: boolean;
+      allowDedicatedSurface?: boolean;
+      /**
+       * Historical recall point in ms-since-epoch (issue #680).  When
+       * set, drops candidates that were not authoritative at this
+       * instant per `temporal-validity.isValidAsOf`.  Caller is
+       * responsible for parsing/validating the user-supplied ISO
+       * string at the input boundary (CLI / HTTP / MCP).
+       */
+      asOfMs?: number;
+    },
+  ): Promise<QmdSearchResult[]> {
+    if (results.length === 0) return results;
+
+    const safety = await this.filterSearchResultsForRecall(
+      results,
+      preloadedMemoryMap,
+      { ...options, recallNamespaces: _recallNamespaces },
+    );
+    const safeResults = safety.results;
+    const memoryByPath = safety.memoryByPath;
+    if (safeResults.length === 0) return safeResults;
+
+    const now = Date.now();
+
+    // Determine temporal/tag query params before index I/O (pure computation).
+    const resultPaths = new Set(
+      safeResults.map((r) => r.path).filter(Boolean) as string[],
+    );
+    let temporalFromDate: string | null = null;
+    let promptTags: string[] = [];
+    if (this.config.queryAwareIndexingEnabled && prompt) {
+      if (isTemporalQuery(prompt)) {
+        temporalFromDate = recencyWindowFromPrompt(prompt, now);
+      }
+      promptTags = extractTagsFromPrompt(prompt);
+    }
+
+    const [rawTemporal, rawTags] = await Promise.all([
+      temporalFromDate !== null
+        ? queryByDateRangeAsync(this.config.memoryDir, temporalFromDate)
+        : Promise.resolve<Set<string> | null>(null),
+      promptTags.length > 0
+        ? queryByTagsAsync(this.config.memoryDir, promptTags)
+        : Promise.resolve<Set<string> | null>(null),
+    ]);
+
+    const queryIntent =
+      this.config.intentRoutingEnabled && prompt
+        ? inferIntentFromText(prompt)
+        : null;
+
+    // v8.1: Temporal + Tag prefilter candidate set
+    // Scope to result paths first so cross-namespace paths don't consume the cap.
+    let temporalCandidates: Set<string> | null = null;
+    let tagCandidates: Set<string> | null = null;
+    if (this.config.queryAwareIndexingEnabled && prompt) {
+      const maxCandidates = this.config.queryAwareIndexingMaxCandidates;
+      const capSet = (s: Set<string> | null): Set<string> | null => {
+        if (!s) return null;
+        // Intersect with result paths first so out-of-scope paths don't exhaust the budget
+        const scoped = new Set(Array.from(s).filter((p) => resultPaths.has(p)));
+        if (maxCandidates === 0 || scoped.size <= maxCandidates)
+          return scoped;
+        return new Set(Array.from(scoped).slice(0, maxCandidates));
+      };
+      if (temporalFromDate !== null) {
+        temporalCandidates = capSet(rawTemporal);
+      }
+      if (promptTags.length > 0) {
+        tagCandidates = capSet(rawTags);
+      }
+    }
+
+    const boosted: QmdSearchResult[] = [];
+    const recencyWeight = this.effectiveRecencyWeight();
+    for (const r of safeResults) {
+      const memory = memoryByPath.get(r.path);
+      let score = r.score;
+
+      if (memory) {
         // Recency boost: exponential decay over 7 days
         if (recencyWeight > 0) {
           const createdAt = new Date(memory.frontmatter.created).getTime();
@@ -16521,26 +17452,6 @@ export class Orchestrator {
       }
 
       boosted.push({ ...r, score });
-    }
-    if (lifecycleFilteredCount > 0) {
-      log.debug(
-        `lifecycle retrieval filter removed ${lifecycleFilteredCount} stale/archived candidates`,
-      );
-    }
-    if (temporalSupersededFilteredCount > 0) {
-      log.debug(
-        `temporal supersession filter removed ${temporalSupersededFilteredCount} superseded candidates`,
-      );
-    }
-    if (dedicatedSurfaceFilteredCount > 0) {
-      log.debug(
-        `dedicated surface filter removed ${dedicatedSurfaceFilteredCount} dream/procedural candidates from generic recall`,
-      );
-    }
-    if (forgottenFilteredCount > 0) {
-      log.debug(
-        `forgotten status filter removed ${forgottenFilteredCount} candidates from recall`,
-      );
     }
 
     // Re-sort by boosted score
@@ -16769,8 +17680,52 @@ export class Orchestrator {
     }));
   }
 
+  private async graphSeedPathRelativeToStorage(
+    storage: StorageManager,
+    result: QmdSearchResult,
+    recallNamespaces: readonly string[] = [],
+  ): Promise<string | null> {
+    const parts = qmdCollectionPathParts(result.path);
+    if (parts) {
+      const memory = await this.readQmdResultMemory(
+        result.path,
+        storage,
+        recallNamespaces,
+      );
+      return memory
+        ? graphPathRelativeToStorage(storage.dir, memory.path)
+        : null;
+    }
+    return graphPathRelativeToStorage(storage.dir, result.path);
+  }
+
+  private async graphSeedPathsWithinDeadline(
+    storage: StorageManager,
+    results: QmdSearchResult[],
+    deadlineAtMs: number,
+    recallNamespaces: readonly string[] = [],
+  ): Promise<string[]> {
+    const resolved: string[] = [];
+    for (const result of results) {
+      if (Date.now() >= deadlineAtMs) break;
+      const seedPath = await this.graphSeedPathRelativeToStorage(
+        storage,
+        result,
+        recallNamespaces,
+      );
+      if (Date.now() >= deadlineAtMs) break;
+      if (seedPath) resolved.push(seedPath);
+    }
+    return resolved;
+  }
+
   private namespaceFromPath(p: string): string {
     if (!this.config.namespacesEnabled) return this.config.defaultNamespace;
+    const parts = qmdCollectionPathParts(p);
+    const collectionNamespace = parts
+      ? this.qmdCollectionNamespaceFromPrefix(parts.collection)
+      : null;
+    if (collectionNamespace) return collectionNamespace;
     const m = p.match(/[\\/]+namespaces[\\/]+([^\\/]+)(?:[\\/]|$)/);
     if (!m?.[1]) return this.config.defaultNamespace;
     return namespaceIdentityFromToken(m[1]) ?? m[1];

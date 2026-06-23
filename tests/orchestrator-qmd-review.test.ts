@@ -312,6 +312,13 @@ test("cold-tier recall forwards explain traces even when intent hints are disabl
     qmdIntentHintsEnabled: false,
   });
   const orchestrator = new Orchestrator(cfg) as any;
+  const memoryId = await orchestrator.storage.writeMemory(
+    "fact",
+    "cold explain trace memory",
+  );
+  const memory = await orchestrator.storage.getMemoryById(memoryId);
+  assert.ok(memory);
+  const migrated = await orchestrator.storage.migrateMemoryToTier(memory, "cold");
 
   let capturedOptions: Record<string, unknown> | undefined;
   orchestrator.qmd = {
@@ -326,9 +333,9 @@ test("cold-tier recall forwards explain traces even when intent hints are disabl
     capturedOptions = options.searchOptions;
     return [
       {
-        docid: "fact-1",
-        path: "facts/2026-03-11/fact-1.md",
-        snippet: "fact one",
+        docid: memory.frontmatter.id,
+        path: migrated.targetPath,
+        snippet: "cold explain trace memory",
         score: 0.9,
       },
     ];
@@ -344,6 +351,479 @@ test("cold-tier recall forwards explain traces even when intent hints are disabl
 
   assert.equal(results.length, 1);
   assert.deepEqual(capturedOptions, { explain: true });
+});
+
+test("cold-tier recall reads encrypted cold collection paths through primary storage", async () => {
+  const memoryDir = await mkdtemp(path.join(os.tmpdir(), "engram-qmd-review-cold-secure-"));
+  const cfg = parseConfig({
+    openaiApiKey: "sk-test",
+    memoryDir,
+    workspaceDir: path.join(memoryDir, "workspace"),
+    qmdColdTierEnabled: true,
+    qmdColdCollection: "openclaw-engram-cold",
+    secureStoreEnabled: true,
+  });
+  const orchestrator = new Orchestrator(cfg) as any;
+  orchestrator.storage.setSecureStoreKey(Buffer.alloc(32, 9), true);
+  const memoryId = await orchestrator.storage.writeMemory(
+    "fact",
+    "encrypted cold collection memory",
+  );
+  const memory = await orchestrator.storage.getMemoryById(memoryId);
+  assert.ok(memory);
+  const migrated = await orchestrator.storage.migrateMemoryToTier(memory, "cold");
+  const coldRelativePath = path
+    .relative(path.join(orchestrator.storage.dir, "cold"), migrated.targetPath)
+    .split(path.sep)
+    .join("/");
+
+  orchestrator.qmd = {
+    isAvailable: () => true,
+  };
+  orchestrator.fetchQmdMemoryResultsWithArtifactTopUp = async () => [
+    {
+      docid: memory.frontmatter.id,
+      path: `openclaw-engram-cold/${coldRelativePath}`,
+      snippet: "encrypted cold collection memory",
+      score: 0.9,
+    },
+  ];
+
+  const results = await orchestrator.applyColdFallbackPipeline({
+    prompt: "review encrypted archive",
+    recallNamespaces: ["default"],
+    recallResultLimit: 2,
+    recallMode: "full",
+    queryAwarePrefilter: EMPTY_PREFILTER,
+  });
+
+  assert.equal(results.length, 1);
+  assert.equal(results[0].docid, memory.frontmatter.id);
+  assert.equal(results[0].path, `openclaw-engram-cold/${coldRelativePath}`);
+});
+
+test("cold-tier recall resolves the default cold collection when config omits it", async () => {
+  const memoryDir = await mkdtemp(path.join(os.tmpdir(), "engram-qmd-review-cold-default-"));
+  const cfg = parseConfig({
+    openaiApiKey: "sk-test",
+    memoryDir,
+    workspaceDir: path.join(memoryDir, "workspace"),
+    qmdColdTierEnabled: true,
+  });
+  const orchestrator = new Orchestrator(cfg) as any;
+  orchestrator.config.qmdColdCollection = undefined;
+  const memoryId = await orchestrator.storage.writeMemory(
+    "fact",
+    "default cold collection memory",
+  );
+  const memory = await orchestrator.storage.getMemoryById(memoryId);
+  assert.ok(memory);
+  const migrated = await orchestrator.storage.migrateMemoryToTier(memory, "cold");
+  const coldRelativePath = path
+    .relative(path.join(orchestrator.storage.dir, "cold"), migrated.targetPath)
+    .split(path.sep)
+    .join("/");
+
+  orchestrator.qmd = {
+    isAvailable: () => true,
+  };
+  orchestrator.fetchQmdMemoryResultsWithArtifactTopUp = async () => [
+    {
+      docid: memory.frontmatter.id,
+      path: `openclaw-engram-cold/${coldRelativePath}`,
+      snippet: "default cold collection memory",
+      score: 0.9,
+    },
+  ];
+
+  const results = await orchestrator.applyColdFallbackPipeline({
+    prompt: "review default cold collection",
+    recallNamespaces: ["default"],
+    recallResultLimit: 2,
+    recallMode: "full",
+    queryAwarePrefilter: EMPTY_PREFILTER,
+  });
+
+  assert.equal(results.length, 1);
+  assert.equal(results[0].docid, memory.frontmatter.id);
+});
+
+test("cold-tier recall resolves collection-prefixed paths from active recall namespaces", async () => {
+  const memoryDir = await mkdtemp(path.join(os.tmpdir(), "engram-qmd-review-cold-ns-"));
+  const cfg = parseConfig({
+    openaiApiKey: "sk-test",
+    memoryDir,
+    workspaceDir: path.join(memoryDir, "workspace"),
+    namespacesEnabled: true,
+    qmdColdTierEnabled: true,
+    qmdColdCollection: "openclaw-engram-cold",
+  });
+  const orchestrator = new Orchestrator(cfg) as any;
+  const namespaceStorage = await orchestrator.getStorage("project-cold");
+  const memoryId = await namespaceStorage.writeMemory(
+    "fact",
+    "project cold namespace memory",
+  );
+  const memory = await namespaceStorage.getMemoryById(memoryId);
+  assert.ok(memory);
+  const migrated = await namespaceStorage.migrateMemoryToTier(memory, "cold");
+  const coldRelativePath = path
+    .relative(path.join(namespaceStorage.dir, "cold"), migrated.targetPath)
+    .split(path.sep)
+    .join("/");
+
+  orchestrator.qmd = {
+    isAvailable: () => true,
+  };
+  orchestrator.fetchQmdMemoryResultsWithArtifactTopUp = async () => [
+    {
+      docid: memory.frontmatter.id,
+      path: `openclaw-engram-cold/${coldRelativePath}`,
+      snippet: "project cold namespace memory",
+      score: 0.9,
+    },
+  ];
+
+  const results = await orchestrator.applyColdFallbackPipeline({
+    prompt: "review project cold namespace",
+    recallNamespaces: ["project-cold"],
+    recallResultLimit: 2,
+    recallMode: "full",
+    queryAwarePrefilter: EMPTY_PREFILTER,
+  });
+
+  assert.equal(results.length, 1);
+  assert.equal(results[0].docid, memory.frontmatter.id);
+  assert.equal(results[0].path, migrated.targetPath);
+});
+
+test("cold-tier recall drops collection-prefixed paths outside active recall namespaces", async () => {
+  const memoryDir = await mkdtemp(path.join(os.tmpdir(), "engram-qmd-review-cold-ns-drop-"));
+  const cfg = parseConfig({
+    openaiApiKey: "sk-test",
+    memoryDir,
+    workspaceDir: path.join(memoryDir, "workspace"),
+    namespacesEnabled: true,
+    qmdColdTierEnabled: true,
+    qmdColdCollection: "openclaw-engram-cold",
+  });
+  const orchestrator = new Orchestrator(cfg) as any;
+  const otherStorage = await orchestrator.getStorage("other-cold");
+  const memoryId = await otherStorage.writeMemory(
+    "fact",
+    "other namespace cold memory",
+  );
+  const memory = await otherStorage.getMemoryById(memoryId);
+  assert.ok(memory);
+  const migrated = await otherStorage.migrateMemoryToTier(memory, "cold");
+  const coldRelativePath = path
+    .relative(path.join(otherStorage.dir, "cold"), migrated.targetPath)
+    .split(path.sep)
+    .join("/");
+
+  orchestrator.qmd = {
+    isAvailable: () => true,
+  };
+  orchestrator.fetchQmdMemoryResultsWithArtifactTopUp = async () => [
+    {
+      docid: memory.frontmatter.id,
+      path: `openclaw-engram-cold/${coldRelativePath}`,
+      snippet: "other namespace cold memory",
+      score: 0.9,
+    },
+  ];
+
+  const results = await orchestrator.applyColdFallbackPipeline({
+    prompt: "review project cold namespace",
+    recallNamespaces: ["project-cold"],
+    recallResultLimit: 2,
+    recallMode: "full",
+    queryAwarePrefilter: EMPTY_PREFILTER,
+  });
+
+  assert.deepEqual(results, []);
+});
+
+test("cold-tier recall resolves absolute cold paths from runtime recall namespaces", async () => {
+  const memoryDir = await mkdtemp(path.join(os.tmpdir(), "engram-qmd-review-cold-abs-ns-"));
+  const runtimeDir = await mkdtemp(path.join(os.tmpdir(), "engram-qmd-review-cold-runtime-"));
+  const cfg = parseConfig({
+    openaiApiKey: "sk-test",
+    memoryDir,
+    workspaceDir: path.join(memoryDir, "workspace"),
+    namespacesEnabled: true,
+    qmdColdTierEnabled: true,
+    qmdColdCollection: "openclaw-engram-cold",
+  });
+  const orchestrator = new Orchestrator(cfg) as any;
+  const StorageManagerCtor = orchestrator.storage.constructor as new (
+    dir: string,
+  ) => typeof orchestrator.storage;
+  const runtimeStorage = new StorageManagerCtor(runtimeDir);
+  const memoryId = await runtimeStorage.writeMemory(
+    "fact",
+    "runtime cold namespace absolute memory",
+  );
+  const memory = await runtimeStorage.getMemoryById(memoryId);
+  assert.ok(memory);
+  const migrated = await runtimeStorage.migrateMemoryToTier(memory, "cold");
+
+  const originalStorageFor = orchestrator.storageRouter.storageFor.bind(
+    orchestrator.storageRouter,
+  );
+  orchestrator.storageRouter.storageFor = async (namespace: string) =>
+    namespace === "runtime-cold"
+      ? runtimeStorage
+      : originalStorageFor(namespace);
+
+  orchestrator.qmd = {
+    isAvailable: () => true,
+  };
+  orchestrator.fetchQmdMemoryResultsWithArtifactTopUp = async () => [
+    {
+      docid: memory.frontmatter.id,
+      path: migrated.targetPath,
+      snippet: "runtime cold namespace absolute memory",
+      score: 0.9,
+    },
+  ];
+
+  const results = await orchestrator.applyColdFallbackPipeline({
+    prompt: "review runtime cold namespace",
+    recallNamespaces: ["runtime-cold"],
+    recallResultLimit: 2,
+    recallMode: "full",
+    queryAwarePrefilter: EMPTY_PREFILTER,
+  });
+
+  assert.equal(results.length, 1);
+  assert.equal(results[0].docid, memory.frontmatter.id);
+  assert.equal(results[0].path, migrated.targetPath);
+});
+
+test("cold fallback keeps absolute fallback hits under active runtime recall roots", async () => {
+  const memoryDir = await mkdtemp(path.join(os.tmpdir(), "engram-qmd-review-archive-abs-ns-"));
+  const runtimeDir = await mkdtemp(path.join(os.tmpdir(), "engram-qmd-review-archive-runtime-"));
+  const cfg = parseConfig({
+    openaiApiKey: "sk-test",
+    memoryDir,
+    workspaceDir: path.join(memoryDir, "workspace"),
+    namespacesEnabled: true,
+    qmdColdTierEnabled: false,
+  });
+  const orchestrator = new Orchestrator(cfg) as any;
+  const StorageManagerCtor = orchestrator.storage.constructor as new (
+    dir: string,
+  ) => typeof orchestrator.storage;
+  const runtimeStorage = new StorageManagerCtor(runtimeDir);
+  const memoryId = await runtimeStorage.writeMemory(
+    "fact",
+    "runtime archive fallback absolute memory",
+  );
+  const memory = await runtimeStorage.getMemoryById(memoryId);
+  assert.ok(memory);
+
+  const originalStorageFor = orchestrator.storageRouter.storageFor.bind(
+    orchestrator.storageRouter,
+  );
+  orchestrator.storageRouter.storageFor = async (namespace: string) =>
+    namespace === "runtime-archive"
+      ? runtimeStorage
+      : originalStorageFor(namespace);
+
+  orchestrator.qmd = {
+    isAvailable: () => false,
+  };
+  orchestrator.searchLongTermArchiveFallback = async () => [
+    {
+      docid: memory.frontmatter.id,
+      path: memory.path,
+      snippet: "runtime archive fallback absolute memory",
+      score: 0.9,
+    },
+  ];
+
+  const results = await orchestrator.applyColdFallbackPipeline({
+    prompt: "review runtime archive fallback",
+    recallNamespaces: ["runtime-archive"],
+    recallResultLimit: 2,
+    recallMode: "full",
+    queryAwarePrefilter: EMPTY_PREFILTER,
+  });
+
+  assert.equal(results.length, 1);
+  assert.equal(results[0].docid, memory.frontmatter.id);
+  assert.equal(results[0].path, memory.path);
+});
+
+test("graph expansion resolves cold collection seeds from active recall namespaces", async () => {
+  const memoryDir = await mkdtemp(path.join(os.tmpdir(), "engram-qmd-review-cold-graph-"));
+  const runtimeDir = await mkdtemp(path.join(os.tmpdir(), "engram-qmd-review-cold-graph-runtime-"));
+  const cfg = parseConfig({
+    openaiApiKey: "sk-test",
+    memoryDir,
+    workspaceDir: path.join(memoryDir, "workspace"),
+    namespacesEnabled: true,
+    qmdColdTierEnabled: true,
+    qmdColdCollection: "openclaw-engram-cold",
+  });
+  const orchestrator = new Orchestrator(cfg) as any;
+  const StorageManagerCtor = orchestrator.storage.constructor as new (
+    dir: string,
+  ) => typeof orchestrator.storage;
+  const runtimeStorage = new StorageManagerCtor(runtimeDir);
+  const memoryId = await runtimeStorage.writeMemory(
+    "fact",
+    "runtime cold graph seed memory",
+  );
+  const memory = await runtimeStorage.getMemoryById(memoryId);
+  assert.ok(memory);
+  const migrated = await runtimeStorage.migrateMemoryToTier(memory, "cold");
+  const coldRelativePath = path
+    .relative(path.join(runtimeStorage.dir, "cold"), migrated.targetPath)
+    .split(path.sep)
+    .join("/");
+
+  const originalStorageFor = orchestrator.storageRouter.storageFor.bind(
+    orchestrator.storageRouter,
+  );
+  orchestrator.storageRouter.storageFor = async (namespace: string) =>
+    namespace === "runtime-cold"
+      ? runtimeStorage
+      : originalStorageFor(namespace);
+
+  const originalReadQmdResultMemory =
+    orchestrator.readQmdResultMemory.bind(orchestrator);
+  let qmdMemoryReads = 0;
+  orchestrator.readQmdResultMemory = async (...args: unknown[]) => {
+    qmdMemoryReads += 1;
+    return originalReadQmdResultMemory(...args);
+  };
+
+  let graphSeedPaths: string[] = [];
+  orchestrator.graphIndexFor = () => ({
+    spreadingActivation: async (seedPaths: string[]) => {
+      graphSeedPaths = seedPaths;
+      return [];
+    },
+  });
+
+  const expanded = await orchestrator.expandResultsViaGraph({
+    memoryResults: [
+      {
+        docid: memory.frontmatter.id,
+        path: `openclaw-engram-cold/${coldRelativePath}`,
+        snippet: "runtime cold graph seed memory",
+        score: 0.9,
+      },
+    ],
+    recallNamespaces: ["missing-cold", "runtime-cold", "other-cold"],
+    recallResultLimit: 2,
+  });
+
+  assert.equal(qmdMemoryReads, 1);
+  assert.deepEqual(expanded.seedPaths, [migrated.targetPath]);
+  assert.deepEqual(graphSeedPaths, [
+    path.relative(runtimeStorage.dir, migrated.targetPath).split(path.sep).join("/"),
+  ]);
+});
+
+test("recall safety resolves absolute QMD paths from runtime recall namespaces", async () => {
+  const memoryDir = await mkdtemp(path.join(os.tmpdir(), "engram-qmd-review-runtime-ns-"));
+  const runtimeDir = await mkdtemp(path.join(os.tmpdir(), "engram-qmd-review-runtime-root-"));
+  const cfg = parseConfig({
+    openaiApiKey: "sk-test",
+    memoryDir,
+    workspaceDir: path.join(memoryDir, "workspace"),
+    namespacesEnabled: true,
+  });
+  const orchestrator = new Orchestrator(cfg) as any;
+  const StorageManagerCtor = orchestrator.storage.constructor as new (
+    dir: string,
+  ) => typeof orchestrator.storage;
+  const runtimeStorage = new StorageManagerCtor(runtimeDir);
+  const memoryId = await runtimeStorage.writeMemory(
+    "fact",
+    "runtime namespace absolute QMD memory",
+  );
+  const memory = await runtimeStorage.getMemoryById(memoryId);
+  assert.ok(memory);
+
+  const originalStorageFor = orchestrator.storageRouter.storageFor.bind(
+    orchestrator.storageRouter,
+  );
+  orchestrator.storageRouter.storageFor = async (namespace: string) =>
+    namespace === "runtime-overlay"
+      ? runtimeStorage
+      : originalStorageFor(namespace);
+
+  const result = {
+    docid: memory.frontmatter.id,
+    path: memory.path,
+    snippet: "runtime namespace absolute QMD memory",
+    score: 0.9,
+  };
+  const withoutRuntimeNamespace = await orchestrator.filterSearchResultsForRecall(
+    [result],
+    undefined,
+    { dropUnresolved: true },
+  );
+  assert.equal(withoutRuntimeNamespace.results.length, 0);
+
+  const withRuntimeNamespace = await orchestrator.filterSearchResultsForRecall(
+    [result],
+    undefined,
+    { dropUnresolved: true, recallNamespaces: ["runtime-overlay"] },
+  );
+  assert.equal(withRuntimeNamespace.results.length, 1);
+  assert.equal(
+    withRuntimeNamespace.memoryByPath.get(memory.path)?.frontmatter.id,
+    memory.frontmatter.id,
+  );
+});
+
+test("recall safety keeps signal-only memory reads concurrent", async () => {
+  const memoryDir = await mkdtemp(path.join(os.tmpdir(), "engram-qmd-review-signal-concurrency-"));
+  const cfg = parseConfig({
+    openaiApiKey: "sk-test",
+    memoryDir,
+    workspaceDir: path.join(memoryDir, "workspace"),
+  });
+  const orchestrator = new Orchestrator(cfg) as any;
+  let activeReads = 0;
+  let maxActiveReads = 0;
+  orchestrator.readQmdResultMemory = async (resultPath: string) => {
+    activeReads += 1;
+    maxActiveReads = Math.max(maxActiveReads, activeReads);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    activeReads -= 1;
+    return {
+      path: resultPath,
+      content: "memory",
+      frontmatter: {
+        id: resultPath,
+        category: "fact",
+        created: "2026-03-11T12:00:00.000Z",
+        updated: "2026-03-11T12:00:00.000Z",
+      },
+    };
+  };
+
+  const controller = new AbortController();
+  const loaded = await orchestrator.loadSearchResultMemoryMap(
+    Array.from({ length: 8 }, (_, index) => ({
+      docid: `fact-${index}`,
+      path: `facts/2026-03-11/fact-${index}.md`,
+      snippet: "memory",
+      score: 0.9,
+    })),
+    undefined,
+    { abortSignal: controller.signal },
+  );
+
+  assert.equal(loaded.completed, true);
+  assert.equal(loaded.memoryByPath.size, 8);
+  assert.ok(maxActiveReads > 1);
 });
 
 test("QMD recall snapshot helpers read persisted snapshots and memory_qmd_debug is registered", async () => {

@@ -20,11 +20,18 @@ import {
   buildXraySnapshot,
   type RecallXrayResult,
 } from "../src/recall-xray.js";
+import { SecureStoreLockedError } from "../src/secure-store/index.js";
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
 async function makeTmpDir(prefix: string): Promise<string> {
   return mkdtemp(path.join(os.tmpdir(), prefix));
+}
+
+function namespaceIdentityToken(namespace: string): string {
+  const bytes = new TextEncoder().encode(namespace.trim());
+  const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  return `ns-${hex || "default"}`;
 }
 
 async function makeOrchestrator(
@@ -224,6 +231,436 @@ test("boost applied when feature on and memory has reinforcement_count", async (
     Math.abs((result[0].explain?.reinforcementBoost ?? 0) - 0.3) < 1e-9,
     `expected reinforcementBoost ≈ 0.3 but got ${result[0].explain?.reinforcementBoost}`,
   );
+});
+
+test("boost resolves QMD collection-prefixed namespace result paths", async () => {
+  const memoryDir = await makeTmpDir("engram-reinforce-qmd-ns-");
+  const namespace = "team";
+  const namespaceDir = path.join(
+    memoryDir,
+    "namespaces",
+    namespaceIdentityToken(namespace),
+  );
+  const dayDir = path.join(namespaceDir, "facts", "2026-06-16");
+  await mkdir(dayDir, { recursive: true });
+  await writeMemory(dayDir, "fact-ns-001", {
+    reinforcement_count: 2,
+  });
+
+  const orchestrator = await makeOrchestrator(memoryDir, {
+    namespacesEnabled: true,
+    defaultNamespace: "default",
+    sharedNamespace: "shared",
+    namespacePolicies: [
+      {
+        name: namespace,
+        readPrincipals: ["reader"],
+        writePrincipals: ["writer"],
+      },
+    ],
+    qmdCollection: "openclaw-engram",
+    reinforcementRecallBoostEnabled: true,
+    reinforcementRecallBoostWeight: 0.1,
+    reinforcementRecallBoostMax: 1.0,
+  });
+  (orchestrator as any).initPromise = null;
+
+  const collection = `openclaw-engram--${namespaceIdentityToken(namespace)}`;
+  const result = await (orchestrator as any).boostSearchResults(
+    [
+      {
+        docid: "fact-ns-001",
+        path: `${collection}/2026-06-16/fact-ns-001.md`,
+        snippet: "test",
+        score: 0.5,
+      },
+    ],
+    ["default", namespace],
+  );
+
+  assert.equal(result.length, 1);
+  assert.ok(
+    Math.abs(result[0].score - 0.7) < 1e-9,
+    `expected score ≈ 0.7 but got ${result[0].score}`,
+  );
+  assert.ok(
+    Math.abs((result[0].explain?.reinforcementBoost ?? 0) - 0.2) < 1e-9,
+    `expected reinforcementBoost ≈ 0.2 but got ${result[0].explain?.reinforcementBoost}`,
+  );
+});
+
+test("namespace detection decodes QMD collection-prefixed result paths", async () => {
+  const memoryDir = await makeTmpDir("engram-reinforce-qmd-ns-detect-");
+  const namespace = "team";
+  const orchestrator = await makeOrchestrator(memoryDir, {
+    namespacesEnabled: true,
+    defaultNamespace: "default",
+    sharedNamespace: "shared",
+    namespacePolicies: [
+      {
+        name: namespace,
+        readPrincipals: ["reader"],
+        writePrincipals: ["writer"],
+      },
+    ],
+    qmdCollection: "openclaw-engram",
+  });
+
+  const collection = `openclaw-engram--${namespaceIdentityToken(namespace)}`;
+
+  assert.equal(
+    (orchestrator as any).namespaceFromPath(
+      `${collection}/2026-06-16/fact-ns-001.md`,
+    ),
+    namespace,
+  );
+});
+
+test("namespace collection misses do not fall back to default storage", async () => {
+  const memoryDir = await makeTmpDir("engram-reinforce-qmd-ns-miss-");
+  const namespace = "team";
+  const defaultDayDir = path.join(memoryDir, "facts", "2026-06-16");
+  await mkdir(defaultDayDir, { recursive: true });
+  await writeMemory(defaultDayDir, "fact-ns-001", {
+    reinforcement_count: 9,
+  });
+
+  const orchestrator = await makeOrchestrator(memoryDir, {
+    namespacesEnabled: true,
+    defaultNamespace: "default",
+    sharedNamespace: "shared",
+    namespacePolicies: [
+      {
+        name: namespace,
+        readPrincipals: ["reader"],
+        writePrincipals: ["writer"],
+      },
+    ],
+    qmdCollection: "openclaw-engram",
+    reinforcementRecallBoostEnabled: true,
+    reinforcementRecallBoostWeight: 0.1,
+    reinforcementRecallBoostMax: 1.0,
+  });
+  (orchestrator as any).initPromise = null;
+
+  const collection = `openclaw-engram--${namespaceIdentityToken(namespace)}`;
+  const result = await (orchestrator as any).boostSearchResults(
+    [
+      {
+        docid: "fact-ns-001",
+        path: `${collection}/2026-06-16/fact-ns-001.md`,
+        snippet: "stale namespace hit",
+        score: 0.5,
+      },
+    ],
+    ["default", namespace],
+  );
+
+  assert.equal(result.length, 1);
+  assert.strictEqual(result[0].score, 0.5);
+  assert.strictEqual(result[0].explain?.reinforcementBoost, undefined);
+});
+
+test("invalid QMD collection prefixes do not strip into default storage", async () => {
+  const memoryDir = await makeTmpDir("engram-reinforce-qmd-invalid-prefix-");
+  const defaultDayDir = path.join(memoryDir, "facts", "2026-06-16");
+  await mkdir(defaultDayDir, { recursive: true });
+  await writeMemory(defaultDayDir, "fact-invalid-prefix", {
+    reinforcement_count: 9,
+  });
+
+  const orchestrator = await makeOrchestrator(memoryDir, {
+    namespacesEnabled: true,
+    defaultNamespace: "default",
+    sharedNamespace: "shared",
+    qmdCollection: "openclaw-engram",
+    reinforcementRecallBoostEnabled: true,
+    reinforcementRecallBoostWeight: 0.1,
+    reinforcementRecallBoostMax: 1.0,
+  });
+  (orchestrator as any).initPromise = null;
+
+  const result = await (orchestrator as any).boostSearchResults(
+    [
+      {
+        docid: "fact-invalid-prefix",
+        path: "openclaw-engram--not-a-token/2026-06-16/fact-invalid-prefix.md",
+        snippet: "invalid collection prefix",
+        score: 0.5,
+      },
+    ],
+    ["default"],
+  );
+
+  assert.equal(result.length, 1);
+  assert.strictEqual(result[0].score, 0.5);
+  assert.strictEqual(result[0].explain?.reinforcementBoost, undefined);
+});
+
+test("namespace collection traversal paths do not escape storage root", async () => {
+  const memoryDir = await makeTmpDir("engram-reinforce-qmd-traversal-");
+  const namespace = "team";
+  const defaultDayDir = path.join(memoryDir, "facts", "2026-06-16");
+  await mkdir(defaultDayDir, { recursive: true });
+  await writeMemory(defaultDayDir, "fact-traversal", {
+    reinforcement_count: 9,
+  });
+
+  const orchestrator = await makeOrchestrator(memoryDir, {
+    namespacesEnabled: true,
+    defaultNamespace: "default",
+    sharedNamespace: "shared",
+    namespacePolicies: [
+      {
+        name: namespace,
+        readPrincipals: ["reader"],
+        writePrincipals: ["writer"],
+      },
+    ],
+    qmdCollection: "openclaw-engram",
+    reinforcementRecallBoostEnabled: true,
+    reinforcementRecallBoostWeight: 0.1,
+    reinforcementRecallBoostMax: 1.0,
+  });
+  (orchestrator as any).initPromise = null;
+
+  const collection = `openclaw-engram--${namespaceIdentityToken(namespace)}`;
+  const result = await (orchestrator as any).boostSearchResults(
+    [
+      {
+        docid: "fact-traversal",
+        path: `${collection}/../../facts/2026-06-16/fact-traversal.md`,
+        snippet: "traversal hit",
+        score: 0.5,
+      },
+    ],
+    ["default", namespace],
+  );
+
+  assert.equal(result.length, 1);
+  assert.strictEqual(result[0].score, 0.5);
+  assert.strictEqual(result[0].explain?.reinforcementBoost, undefined);
+});
+
+test("date-relative QMD misses do not fall back to storage root basename", async () => {
+  const memoryDir = await makeTmpDir("engram-reinforce-qmd-date-miss-");
+  await writeMemory(memoryDir, "fact-001", {
+    reinforcement_count: 9,
+  });
+
+  const orchestrator = await makeOrchestrator(memoryDir, {
+    reinforcementRecallBoostEnabled: true,
+    reinforcementRecallBoostWeight: 0.1,
+    reinforcementRecallBoostMax: 1.0,
+  });
+  (orchestrator as any).initPromise = null;
+
+  const result = await (orchestrator as any).boostSearchResults(
+    [
+      {
+        docid: "fact-001",
+        path: "2026-06-16/fact-001.md",
+        snippet: "missing dated hit",
+        score: 0.5,
+      },
+    ],
+    ["default"],
+  );
+
+  assert.equal(result.length, 1);
+  assert.strictEqual(result[0].score, 0.5);
+  assert.strictEqual(result[0].explain?.reinforcementBoost, undefined);
+});
+
+test("recall safety filtering is available without running score boosts", async () => {
+  const memoryDir = await makeTmpDir("engram-recall-safety-filter-");
+  const factsDir = path.join(memoryDir, "facts");
+  await mkdir(factsDir, { recursive: true });
+  const active = await writeMemory(factsDir, "fact-active");
+  const forgotten = await writeMemory(factsDir, "fact-forgotten", {
+    status: "forgotten",
+  });
+  const superseded = await writeMemory(factsDir, "fact-superseded", {
+    status: "superseded",
+  });
+  const dream = await writeMemory(factsDir, "fact-dream", {
+    memoryKind: "dream",
+  });
+
+  const orchestrator = await makeOrchestrator(memoryDir, {
+    temporalSupersessionEnabled: true,
+    temporalSupersessionIncludeInRecall: false,
+  });
+  (orchestrator as any).initPromise = null;
+
+  const filtered = await (orchestrator as any).filterSearchResultsForRecall(
+    [
+      { docid: "active", path: active, snippet: "active", score: 0.4 },
+      { docid: "forgotten", path: forgotten, snippet: "forgotten", score: 0.9 },
+      { docid: "superseded", path: superseded, snippet: "superseded", score: 0.8 },
+      { docid: "dream", path: dream, snippet: "dream", score: 0.7 },
+    ],
+    undefined,
+    { dropUnresolved: true },
+  );
+
+  assert.deepEqual(
+    filtered.results.map((result: { path: string }) => path.basename(result.path)),
+    ["fact-active.md"],
+  );
+});
+
+test("absolute QMD result paths read through dynamic namespace owner storage", async () => {
+  const memoryDir = await makeTmpDir("engram-recall-absolute-dynamic-ns-");
+  const dynamicNamespace = "team-project-alpha";
+  const dynamicFactsDir = path.join(
+    memoryDir,
+    "namespaces",
+    namespaceIdentityToken(dynamicNamespace),
+    "facts",
+  );
+  await mkdir(dynamicFactsDir, { recursive: true });
+  const ownedPath = await writeMemory(dynamicFactsDir, "fact-owned");
+
+  const orchestrator = await makeOrchestrator(memoryDir, {
+    namespacesEnabled: true,
+    defaultNamespace: "default",
+    sharedNamespace: "shared",
+    namespacePolicies: [],
+  });
+  (orchestrator as any).initPromise = null;
+
+  const fallbackStorage = await (orchestrator as any).storageRouter.storageFor(
+    "default",
+  );
+  let fallbackReads = 0;
+  fallbackStorage.readMemoryByPath = async () => {
+    fallbackReads += 1;
+    return null;
+  };
+
+  const memory = await (orchestrator as any).readQmdResultMemory(
+    ownedPath,
+    fallbackStorage,
+  );
+
+  assert.equal(fallbackReads, 0);
+  assert.equal(memory?.path, ownedPath);
+  assert.equal(memory?.frontmatter.id, "fact-owned");
+});
+
+test("recall safety filtering drops QMD paths that fail resolution", async () => {
+  const memoryDir = await makeTmpDir("engram-recall-safety-unresolved-qmd-");
+  const factsDir = path.join(memoryDir, "facts");
+  await mkdir(factsDir, { recursive: true });
+  const active = await writeMemory(factsDir, "fact-active");
+
+  const orchestrator = await makeOrchestrator(memoryDir);
+  (orchestrator as any).initPromise = null;
+  const qmdCollection = (orchestrator as any).config.qmdCollection;
+
+  const filtered = await (orchestrator as any).filterSearchResultsForRecall(
+    [
+      { docid: "active", path: active, snippet: "active", score: 0.4 },
+      {
+        docid: "escape",
+        path: `${qmdCollection}/../other/fact.md`,
+        snippet: "unchecked traversal hit",
+        score: 0.9,
+      },
+    ],
+    undefined,
+    { dropUnresolved: true },
+  );
+
+  assert.deepEqual(
+    filtered.results.map((result: { path: string }) => path.basename(result.path)),
+    ["fact-active.md"],
+  );
+});
+
+test("recall safety filtering does not return unchecked results after deadline", async () => {
+  const memoryDir = await makeTmpDir("engram-recall-safety-deadline-");
+  const factsDir = path.join(memoryDir, "facts");
+  await mkdir(factsDir, { recursive: true });
+  const active = await writeMemory(factsDir, "fact-active");
+
+  const orchestrator = await makeOrchestrator(memoryDir);
+  (orchestrator as any).initPromise = null;
+  let readAttempts = 0;
+  (orchestrator as any).readQmdResultMemory = async () => {
+    readAttempts += 1;
+    return null;
+  };
+
+  const filtered = await (orchestrator as any).filterSearchResultsForRecall(
+    [{ docid: "active", path: active, snippet: "active", score: 0.4 }],
+    undefined,
+    { deadlineAtMs: Date.now() - 1 },
+  );
+
+  assert.equal(readAttempts, 0);
+  assert.deepEqual(filtered.results, []);
+});
+
+test("recall safety filtering keeps checked candidates when deadline expires mid-scan", async () => {
+  const memoryDir = await makeTmpDir("engram-recall-safety-partial-deadline-");
+  const factsDir = path.join(memoryDir, "facts");
+  await mkdir(factsDir, { recursive: true });
+  const active = await writeMemory(factsDir, "fact-active");
+  const unchecked = await writeMemory(factsDir, "fact-unchecked");
+
+  const orchestrator = await makeOrchestrator(memoryDir);
+  (orchestrator as any).initPromise = null;
+
+  const realDateNow = Date.now;
+  let nowCalls = 0;
+  Date.now = () => {
+    nowCalls += 1;
+    return nowCalls === 1 ? 1_000 : 2_000;
+  };
+
+  try {
+    const filtered = await (orchestrator as any).filterSearchResultsForRecall(
+      [
+        { docid: "active", path: active, snippet: "active", score: 0.4 },
+        { docid: "unchecked", path: unchecked, snippet: "unchecked", score: 0.9 },
+      ],
+      undefined,
+      { deadlineAtMs: 1_500 },
+    );
+
+    assert.deepEqual(
+      filtered.results.map((result: { path: string }) => path.basename(result.path)),
+      ["fact-active.md"],
+    );
+  } finally {
+    Date.now = realDateNow;
+  }
+});
+
+test("recall safety filtering drops locked secure-store candidates", async () => {
+  const memoryDir = await makeTmpDir("engram-recall-safety-secure-lock-");
+  const factsDir = path.join(memoryDir, "facts");
+  await mkdir(factsDir, { recursive: true });
+  const locked = await writeMemory(factsDir, "fact-locked");
+
+  const orchestrator = await makeOrchestrator(memoryDir);
+  (orchestrator as any).initPromise = null;
+  let readAttempts = 0;
+  (orchestrator as any).readQmdResultMemory = async () => {
+    readAttempts += 1;
+    throw new SecureStoreLockedError("locked namespace store");
+  };
+
+  const filtered = await (orchestrator as any).filterSearchResultsForRecall(
+    [{ docid: "locked", path: locked, snippet: "locked candidate", score: 0.9 }],
+    undefined,
+    {},
+  );
+
+  assert.equal(readAttempts, 1);
+  assert.deepEqual(filtered.results, []);
 });
 
 test("boost capped at reinforcementRecallBoostMax", async () => {

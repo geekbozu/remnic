@@ -519,12 +519,9 @@ test("recallInternal uses already-settled qmd results after the enrichment budge
   const memory = await (orchestrator as any).storage.getMemoryById(memoryId);
   assert.ok(memory);
 
-  let releaseBoxes: (() => void) | null = null;
   (orchestrator as any).boxBuilderFor = () => ({
     readRecentBoxes: async () => {
-      await new Promise<void>((resolve) => {
-        releaseBoxes = resolve;
-      });
+      await new Promise<never>(() => {});
       return [];
     },
   });
@@ -542,8 +539,6 @@ test("recallInternal uses already-settled qmd results after the enrichment budge
       score: 0.91,
     },
   ];
-
-  setTimeout(() => releaseBoxes?.(), 15);
 
   const context = await (orchestrator as any).recallInternal(
     "Summarize the current project state.",
@@ -823,4 +818,254 @@ test("recallInternal shares one enrichment timeout budget across sequential enri
     elapsedMs < 170,
     `expected compounding to share the remaining enrichment budget, saw ${elapsedMs}ms`,
   );
+});
+
+test("recallInternal keeps qmd safety reads deadline-bound when qmd settles during the qmd wait", async () => {
+  clearQmdRecallCache();
+  const orchestrator = await makeOrchestrator(
+    "engram-recall-qmd-settles-during-wait-",
+    {
+      qmdEnabled: true,
+      recallEnrichmentDeadlineMs: 1000,
+    },
+  );
+
+  const memoryId = await (orchestrator as any).storage.writeMemory(
+    "fact",
+    "qmd settled during wait memory",
+  );
+  const memory = await (orchestrator as any).storage.getMemoryById(memoryId);
+  assert.ok(memory);
+
+  const observedSafetyDeadlines: Array<number | null> = [];
+  const originalFilterSearchResultsForRecall =
+    (orchestrator as any).filterSearchResultsForRecall.bind(orchestrator);
+  (orchestrator as any).filterSearchResultsForRecall = async (
+    results: unknown[],
+    preloadedMemoryMap?: unknown,
+    options?: { deadlineAtMs?: number | null },
+  ) => {
+    if (
+      options &&
+      Object.prototype.hasOwnProperty.call(options, "deadlineAtMs")
+    ) {
+      observedSafetyDeadlines.push(options.deadlineAtMs ?? null);
+    }
+    return originalFilterSearchResultsForRecall(
+      results,
+      preloadedMemoryMap,
+      options,
+    );
+  };
+
+  (orchestrator as any).qmd = {
+    isAvailable: () => true,
+    probe: async () => true,
+    debugStatus: () => "qmd ready",
+  };
+  (orchestrator as any).fetchQmdMemoryResultsWithArtifactTopUp = async () => {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    return [
+      {
+        docid: memory.frontmatter.id,
+        path: memory.path,
+        snippet: "qmd settled during wait memory",
+        score: 0.91,
+      },
+    ];
+  };
+
+  const context = await (orchestrator as any).recallInternal(
+    "Summarize the current project state.",
+    "agent:test:qmd-settles-during-wait",
+    { mode: "full" },
+  );
+
+  assert.match(context, /qmd settled during wait memory/);
+  assert.equal(observedSafetyDeadlines.length, 1);
+  assert.equal(typeof observedSafetyDeadlines[0], "number");
+});
+
+test("cold fallback deadline stops before cold QMD and archive scanning", async () => {
+  const orchestrator = await makeOrchestrator("engram-cold-fallback-deadline-", {
+    qmdColdTierEnabled: true,
+    qmdEnabled: true,
+  });
+
+  let coldQmdReads = 0;
+  let archiveReads = 0;
+  (orchestrator as any).qmd = { isAvailable: () => true };
+  (orchestrator as any).fetchQmdMemoryResultsWithArtifactTopUp = async () => {
+    coldQmdReads += 1;
+    return [];
+  };
+  (orchestrator as any).readArchivedMemoriesForNamespaces = async () => {
+    archiveReads += 1;
+    return [];
+  };
+
+  const results = await (orchestrator as any).applyColdFallbackPipeline({
+    prompt: "archive deadline test",
+    recallNamespaces: ["default"],
+    recallResultLimit: 5,
+    recallMode: "minimal",
+    deadlineAtMs: Date.now() - 1,
+  });
+
+  assert.deepEqual(results, []);
+  assert.equal(coldQmdReads, 0);
+  assert.equal(archiveReads, 0);
+});
+
+test("cold fallback resolves QMD cold collection-prefixed result paths", async () => {
+  const orchestrator = await makeOrchestrator("engram-cold-fallback-qmd-prefix-", {
+    qmdColdTierEnabled: true,
+    qmdEnabled: true,
+    qmdColdCollection: "openclaw-engram-cold",
+  });
+  const storage = (orchestrator as any).storage;
+  const memoryId = await storage.writeMemory(
+    "fact",
+    "cold collection-prefixed memory",
+  );
+  const hotMemory = await storage.getMemoryById(memoryId);
+  assert.ok(hotMemory);
+  const migrated = await storage.migrateMemoryToTier(hotMemory, "cold");
+  const coldRelativePath = path
+    .relative(path.join(storage.dir, "cold"), migrated.targetPath)
+    .split(path.sep)
+    .join("/");
+  const coldCollectionPath = `openclaw-engram-cold/${coldRelativePath}`;
+
+  let archiveReads = 0;
+  (orchestrator as any).qmd = { isAvailable: () => true };
+  (orchestrator as any).fetchQmdMemoryResultsWithArtifactTopUp = async () => [
+    {
+      docid: hotMemory.frontmatter.id,
+      path: coldCollectionPath,
+      snippet: "cold collection-prefixed memory",
+      score: 0.91,
+    },
+  ];
+  (orchestrator as any).readArchivedMemoriesForNamespaces = async () => {
+    archiveReads += 1;
+    return [];
+  };
+
+  const results = await (orchestrator as any).applyColdFallbackPipeline({
+    prompt: "cold collection prefix test",
+    recallNamespaces: ["default"],
+    recallResultLimit: 5,
+    recallMode: "minimal",
+  });
+
+  assert.equal(archiveReads, 0);
+  assert.equal(results.length, 1);
+  assert.equal(results[0].docid, hotMemory.frontmatter.id);
+  assert.equal(results[0].path, coldCollectionPath);
+});
+
+test("recallInternal skips embedding fallback after assembly budget expires", async () => {
+  clearQmdRecallCache();
+  const orchestrator = await makeOrchestrator(
+    "engram-recall-embedding-fallback-deadline-",
+    {
+      qmdEnabled: true,
+      embeddingFallbackEnabled: true,
+      memoryBoxesEnabled: true,
+      boxRecallDays: 1,
+      recallEnrichmentDeadlineMs: 5,
+      queryAwareIndexingEnabled: false,
+      parallelRetrievalEnabled: false,
+    },
+  );
+
+  (orchestrator as any).boxBuilderFor = () => ({
+    readRecentBoxes: async () => {
+      await new Promise<never>(() => {});
+      return [];
+    },
+  });
+  (orchestrator as any).qmd = {
+    isAvailable: () => true,
+    probe: async () => true,
+    debugStatus: () => "qmd ready",
+  };
+  (orchestrator as any).fetchQmdMemoryResultsWithArtifactTopUp = async () => [];
+  let embeddingCalls = 0;
+  (orchestrator as any).searchEmbeddingFallback = async () => {
+    embeddingCalls += 1;
+    return [
+      {
+        docid: "late-embedding",
+        path: "facts/2026-03-11/late-embedding.md",
+        snippet: "late embedding memory",
+        score: 0.9,
+      },
+    ];
+  };
+
+  const context = await (orchestrator as any).recallInternal(
+    "Summarize the current project state.",
+    "agent:test:embedding-fallback-deadline",
+    { mode: "full" },
+  );
+
+  assert.equal(embeddingCalls, 0);
+  assert.doesNotMatch(context, /late embedding memory/);
+});
+
+test("recallInternal skips no-QMD hot fallback after assembly budget expires", async () => {
+  clearQmdRecallCache();
+  const orchestrator = await makeOrchestrator(
+    "engram-recall-no-qmd-fallback-deadline-",
+    {
+      qmdEnabled: true,
+      embeddingFallbackEnabled: true,
+      memoryBoxesEnabled: true,
+      boxRecallDays: 1,
+      recallEnrichmentDeadlineMs: 5,
+      queryAwareIndexingEnabled: false,
+      parallelRetrievalEnabled: false,
+    },
+  );
+
+  (orchestrator as any).boxBuilderFor = () => ({
+    readRecentBoxes: async () => {
+      await new Promise<never>(() => {});
+      return [];
+    },
+  });
+  (orchestrator as any).qmd = {
+    isAvailable: () => false,
+    probe: async () => false,
+    debugStatus: () => "qmd unavailable",
+  };
+  let embeddingCalls = 0;
+  (orchestrator as any).searchEmbeddingFallback = async () => {
+    embeddingCalls += 1;
+    return [
+      {
+        docid: "late-no-qmd-embedding",
+        path: "facts/2026-03-11/late-no-qmd-embedding.md",
+        snippet: "late no-qmd embedding memory",
+        score: 0.9,
+      },
+    ];
+  };
+  let recentScanReads = 0;
+  (orchestrator as any).readAllMemoriesForNamespaces = async () => {
+    recentScanReads += 1;
+    return [];
+  };
+
+  const context = await (orchestrator as any).recallInternal(
+    "Summarize the current project state.",
+    "agent:test:no-qmd-fallback-deadline",
+    { mode: "full" },
+  );
+
+  assert.equal(embeddingCalls, 0);
+  assert.equal(recentScanReads, 0);
+  assert.doesNotMatch(context, /late no-qmd embedding memory/);
 });

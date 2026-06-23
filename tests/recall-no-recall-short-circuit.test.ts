@@ -838,7 +838,28 @@ test("recall accepts readable namespace overrides even when they are excluded fr
 
 test("cold fallback uses configured cold QMD collection before archive scan", async () => {
   const memoryDir = tmpDir("engram-cold-qmd");
-  await mkdir(memoryDir, { recursive: true });
+  const factsDir = path.join(memoryDir, "facts");
+  await mkdir(factsDir, { recursive: true });
+  const coldMemoryPath = path.join(factsDir, "fact-cold-qmd-1.md");
+  await writeFile(
+    coldMemoryPath,
+    [
+      "---",
+      "id: fact-cold-qmd-1",
+      "category: fact",
+      "created: 2026-01-01T00:00:00.000Z",
+      "updated: 2026-01-01T00:00:00.000Z",
+      "source: extraction",
+      "confidence: 0.9",
+      "confidenceTier: explicit",
+      "status: active",
+      "---",
+      "",
+      "Cold collection memory about shard migration edge cases.",
+      "",
+    ].join("\n"),
+    "utf-8",
+  );
 
   const cfg = baseConfig(memoryDir);
   cfg.recallPlannerEnabled = false;
@@ -857,7 +878,7 @@ test("cold fallback uses configured cold QMD collection before archive scan", as
         return [
           {
             docid: "fact-cold-qmd-1",
-            path: "/tmp/memory/default/facts/fact-cold-qmd-1.md",
+            path: coldMemoryPath,
             snippet: "Cold collection memory about shard migration edge cases",
             score: 0.91,
           },
