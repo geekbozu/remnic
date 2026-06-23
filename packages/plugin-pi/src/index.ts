@@ -36,6 +36,19 @@ type PiSessionState = {
   lastInjectedRecallKey: string;
 };
 
+type NotifyLevel = "info" | "success" | "warning" | "error";
+type NotifyFn = (message: string, level: NotifyLevel) => void;
+
+type PiContextSnapshot = {
+  sessionKey: string;
+  cwd: string;
+  entries: any[];
+  branch: any[];
+  notify: NotifyFn;
+  setStatus: (key: string, value: string) => void;
+  compact?: () => unknown;
+};
+
 export function createRemnicPiExtension(options: RemnicPiExtensionOptions = {}) {
   const config = options.config ?? loadConfig(options);
   const client = new RemnicClient(config);
@@ -43,75 +56,80 @@ export function createRemnicPiExtension(options: RemnicPiExtensionOptions = {}) 
 
   return async function remnicPiExtension(pi: PiApi): Promise<void> {
     pi.on("session_start", async (_event, ctx) => {
-      const { state } = getSessionState(ctx, sessionStates);
-      restoreObservedState(ctx, state.observedHashes);
+      const session = snapshotPiContext(ctx);
+      const { state } = getSessionState(session.sessionKey, sessionStates);
+      restoreObservedState(session, state.observedHashes);
       if (!config.statusEnabled) return;
-      await setStatus(ctx, client, config);
+      await setStatus(session, client, config);
     });
 
     pi.on("context", async (event, ctx) => {
+      const session = snapshotPiContext(ctx);
       if (!config.recallEnabled || !config.authToken) return;
       const recallTarget = latestUserRecallTarget(Array.isArray(event.messages) ? event.messages : []);
       if (!recallTarget) return;
       const { query } = recallTarget;
-      const sessionKey = sessionKeyFromContext(ctx);
-      const { state } = getSessionState(ctx, sessionStates);
+      const { state } = getSessionState(session.sessionKey, sessionStates);
       if (recallTarget.dedupeKey === state.lastInjectedRecallKey) return;
 
       try {
-        const recalled = await client.recall(query, sessionKey, ctx.cwd);
+        const recalled = await client.recall(query, session.sessionKey, session.cwd);
         const context = trimContext(recalled.context ?? "", config.recallBudgetChars);
         if (!context) return;
         state.lastInjectedRecallKey = recallTarget.dedupeKey;
         return {
           messages: [
+            ...event.messages,
             {
               role: "user",
               content: [{ type: "text", text: `Remnic recalled context for this turn:\n\n${context}` }],
               remnicInjected: true,
               timestamp: Date.now(),
             },
-            ...event.messages,
           ],
         };
       } catch (err) {
-        notify(ctx, `Remnic recall unavailable: ${errorMessage(err)}`, "warning");
+        session.notify(`Remnic recall unavailable: ${errorMessage(err)}`, "warning");
       }
     });
 
     pi.on("message_end", async (event, ctx) => {
+      const session = snapshotPiContext(ctx);
       if (!config.observeEnabled || !isUserMessage(event.message)) return;
-      const { state } = getSessionState(ctx, sessionStates);
-      await observeMessages(ctx, client, [event.message], state.observedHashes, state.liveObservedReplayKeys);
+      const { state } = getSessionState(session.sessionKey, sessionStates);
+      await observeMessagesForSession(session, client, [event.message], state.observedHashes, state.liveObservedReplayKeys);
     });
 
     pi.on("turn_end", async (event, ctx) => {
+      const session = snapshotPiContext(ctx);
       if (!config.observeEnabled) return;
       const messages = [event.message, ...(Array.isArray(event.toolResults) ? event.toolResults : [])];
-      const { state } = getSessionState(ctx, sessionStates);
-      await observeMessages(ctx, client, messages, state.observedHashes, state.liveObservedReplayKeys);
+      const { state } = getSessionState(session.sessionKey, sessionStates);
+      await observeMessagesForSession(session, client, messages, state.observedHashes, state.liveObservedReplayKeys);
     });
 
     pi.on("session_shutdown", async (_event, ctx) => {
-      const { sessionKey, state } = getSessionState(ctx, sessionStates);
+      const session = snapshotPiContext(ctx);
+      const { sessionKey, state } = getSessionState(session.sessionKey, sessionStates);
       if (config.observeEnabled) {
-        const branch = safeBranch(ctx);
-        const branchMessages = branchMessagesWithEntryIdentity(branch);
-        const unobservedBranchMessages = skipLiveObservedReplayMessages(ctx, branchMessages, state.liveObservedReplayKeys);
-        if (unobservedBranchMessages.length > 0) await observeMessages(ctx, client, unobservedBranchMessages, state.observedHashes);
+        const branchMessages = branchMessagesWithEntryIdentity(session.branch);
+        const unobservedBranchMessages = skipLiveObservedReplayMessages(session.sessionKey, branchMessages, state.liveObservedReplayKeys);
+        if (unobservedBranchMessages.length > 0) {
+          await observeMessagesForSession(session, client, unobservedBranchMessages, state.observedHashes);
+        }
       }
       persistObservedState(pi, state.observedHashes);
       sessionStates.delete(sessionKey);
     });
 
     pi.on("session_before_compact", async (event, ctx) => {
+      const session = snapshotPiContext(ctx);
       if (!config.compactionEnabled || !config.authToken) return;
-      const sessionKey = sessionKeyFromContext(ctx);
       const preparation = event.preparation ?? {};
       try {
-        await client.lcmCompactionFlush(sessionKey);
+        await client.lcmCompactionFlush(session.sessionKey);
       } catch (err) {
-        notify(ctx, `Remnic LCM flush failed: ${errorMessage(err)}`, "warning");
+        session.notify(`Remnic LCM flush failed: ${errorMessage(err)}`, "warning");
         return;
       }
 
@@ -119,18 +137,18 @@ export function createRemnicPiExtension(options: RemnicPiExtensionOptions = {}) 
       const tokensAfter = finiteTokenCount(preparation.tokensAfter);
       if (tokensBefore !== null && tokensAfter !== null) {
         try {
-          await client.lcmCompactionRecord(sessionKey, tokensBefore, tokensAfter);
+          await client.lcmCompactionRecord(session.sessionKey, tokensBefore, tokensAfter);
         } catch (err) {
-          notify(ctx, `Remnic LCM compaction token record failed: ${errorMessage(err)}`, "warning");
+          session.notify(`Remnic LCM compaction token record failed: ${errorMessage(err)}`, "warning");
         }
       }
 
       const summary = buildCompactionSummary(preparation);
       if (!summary.trim()) return;
       try {
-        await client.contextCheckpoint(sessionKey, summary);
+        await client.contextCheckpoint(session.sessionKey, summary);
       } catch (err) {
-        notify(ctx, `Remnic context checkpoint failed: ${errorMessage(err)}`, "warning");
+        session.notify(`Remnic context checkpoint failed: ${errorMessage(err)}`, "warning");
       }
       const details = fileDetailsFromPreparation(preparation);
       return {
@@ -160,74 +178,77 @@ export default async function remnicPiExtension(pi: PiApi): Promise<void> {
 function registerCommands(pi: PiApi, client: RemnicClient, config: RemnicPiConfig): void {
   pi.registerCommand("remnic-status", {
     description: "Check Remnic daemon status",
-    handler: commandHandler(async (_args, ctx) => {
+    handler: commandHandler(async (_args, _ctx, session) => {
       const health = await client.health();
-      notify(ctx, `Remnic ${health.ok ? "healthy" : "unhealthy"} at ${config.remnicDaemonUrl}`, health.ok ? "success" : "warning");
+      session.notify(`Remnic ${health.ok ? "healthy" : "unhealthy"} at ${config.remnicDaemonUrl}`, health.ok ? "success" : "warning");
     }),
   });
 
   pi.registerCommand("remnic-recall", {
     description: "Recall Remnic context for a query",
-    handler: commandHandler(async (args, ctx) => {
+    handler: commandHandler(async (args, _ctx, session) => {
       const query = args.trim();
       if (!query) {
-        notify(ctx, "Usage: /remnic-recall <query>", "warning");
+        session.notify("Usage: /remnic-recall <query>", "warning");
         return;
       }
-      const result = await client.recall(query, sessionKeyFromContext(ctx), ctx.cwd);
-      notify(ctx, trimContext(result.context ?? "(no Remnic context)", MAX_CONTEXT_CHARS), "info");
+      const result = await client.recall(query, session.sessionKey, session.cwd);
+      session.notify(trimContext(result.context ?? "(no Remnic context)", MAX_CONTEXT_CHARS), "info");
     }),
   });
 
   pi.registerCommand("remnic-remember", {
     description: "Store a Remnic memory",
-    handler: commandHandler(async (args, ctx) => {
+    handler: commandHandler(async (args, _ctx, session) => {
       const content = args.trim();
       if (!content) {
-        notify(ctx, "Usage: /remnic-remember <memory>", "warning");
+        session.notify("Usage: /remnic-remember <memory>", "warning");
         return;
       }
-      await client.storeMemory(content, sessionKeyFromContext(ctx));
-      notify(ctx, "Stored Remnic memory", "success");
+      await client.storeMemory(content, session.sessionKey);
+      session.notify("Stored Remnic memory", "success");
     }),
   });
 
   pi.registerCommand("remnic-lcm-search", {
     description: "Search Remnic LCM archived Pi context",
-    handler: commandHandler(async (args, ctx) => {
+    handler: commandHandler(async (args, _ctx, session) => {
       const query = args.trim();
       if (!query) {
-        notify(ctx, "Usage: /remnic-lcm-search <query>", "warning");
+        session.notify("Usage: /remnic-lcm-search <query>", "warning");
         return;
       }
-      const result = await client.lcmSearch(query, sessionKeyFromContext(ctx));
-      notify(ctx, JSON.stringify(result, null, 2), "info");
+      const result = await client.lcmSearch(query, session.sessionKey);
+      session.notify(JSON.stringify(result, null, 2), "info");
     }),
   });
 
   pi.registerCommand("remnic-why", {
     description: "Explain the last Remnic recall",
-    handler: commandHandler(async (_args, ctx) => {
-      const result = await client.recallExplain(sessionKeyFromContext(ctx));
-      notify(ctx, JSON.stringify(result, null, 2), "info");
+    handler: commandHandler(async (_args, _ctx, session) => {
+      const result = await client.recallExplain(session.sessionKey);
+      session.notify(JSON.stringify(result, null, 2), "info");
     }),
   });
 
   pi.registerCommand("remnic-compact", {
     description: "Trigger Pi compaction with Remnic LCM coordination",
-    handler: commandHandler(async (_args, ctx) => {
-      ctx.compact?.();
-      notify(ctx, "Compaction requested", "info");
+    handler: commandHandler(async (_args, _ctx, session) => {
+      session.compact?.();
+      session.notify("Compaction requested", "info");
     }),
   });
 }
 
-function commandHandler(handler: (args: string, ctx: any) => Promise<void>): (args: string, ctx: any) => Promise<void> {
+function commandHandler(
+  handler: (args: string, ctx: any, session: PiContextSnapshot) => Promise<void>,
+): (args: string, ctx: any) => Promise<void> {
   return async (args, ctx) => {
+    const session = snapshotPiContext(ctx);
     try {
-      await handler(args, ctx);
+      await handler(args, ctx, session);
     } catch (err) {
-      notify(ctx, `Remnic command failed: ${errorMessage(err)}`, "warning");
+      session.notify(`Remnic command failed: ${errorMessage(err)}`, "warning");
     }
   };
 }
@@ -248,13 +269,13 @@ async function registerMcpTools(pi: PiApi, client: RemnicClient, config: RemnicP
       description: tool.description ?? `Call ${tool.name}`,
       parameters: toPiToolParametersSchema(tool.inputSchema),
       async execute(_toolCallId: string, params: Record<string, unknown>, _signal: AbortSignal | undefined, _onUpdate: unknown, ctx: any) {
-        const sessionKey = sessionKeyFromContext(ctx);
+        const session = snapshotPiContext(ctx);
         const safeParams = stripSessionOwnedRuntimeFields(params ?? {}) as Record<string, unknown>;
         const result = await client.mcpTool(tool.name, {
           ...safeParams,
-          sessionKey,
+          sessionKey: session.sessionKey,
           namespace: config.namespace,
-          cwd: ctx.cwd,
+          cwd: session.cwd,
         });
         return {
           content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
@@ -333,8 +354,7 @@ function isUserMessage(message: unknown): boolean {
   return isRecord(message) && message.role === "user";
 }
 
-function getSessionState(ctx: any, states: Map<string, PiSessionState>): { sessionKey: string; state: PiSessionState } {
-  const sessionKey = sessionKeyFromContext(ctx);
+function getSessionState(sessionKey: string, states: Map<string, PiSessionState>): { sessionKey: string; state: PiSessionState } {
   let state = states.get(sessionKey);
   if (!state) {
     state = {
@@ -363,28 +383,38 @@ export async function observeMessages(
   observedHashes: Set<string>,
   liveObservedReplayKeys?: Map<string, number>,
 ): Promise<void> {
-  const sessionKey = sessionKeyFromContext(ctx);
+  const session = snapshotPiContext(ctx);
+  await observeMessagesForSession(session, client, rawMessages, observedHashes, liveObservedReplayKeys);
+}
+
+async function observeMessagesForSession(
+  session: PiContextSnapshot,
+  client: RemnicClient,
+  rawMessages: unknown[],
+  observedHashes: Set<string>,
+  liveObservedReplayKeys?: Map<string, number>,
+): Promise<void> {
   const messages: ObserveMessage[] = [];
   const pendingHashes = new Set<string>();
   for (const raw of rawMessages) {
     const message = toObserveMessage(raw);
     if (!message) continue;
-    const hash = observedMessageDedupeKey(message, sessionKey);
+    const hash = observedMessageDedupeKey(message, session.sessionKey);
     if (hash && (observedHashes.has(hash) || pendingHashes.has(hash))) continue;
     if (hash) pendingHashes.add(hash);
     messages.push(message);
   }
   if (messages.length === 0) return;
   try {
-    await client.observe(sessionKey, ctx.cwd, messages);
+    await client.observe(session.sessionKey, session.cwd, messages);
     for (const hash of pendingHashes) rememberObservedHash(observedHashes, hash);
     if (liveObservedReplayKeys) {
       for (const message of messages) {
-        rememberLiveObservedReplayKey(liveObservedReplayKeys, liveReplayKey(message, sessionKey));
+        rememberLiveObservedReplayKey(liveObservedReplayKeys, liveReplayKey(message, session.sessionKey));
       }
     }
   } catch (err) {
-    notify(ctx, `Remnic observe failed: ${errorMessage(err)}`, "warning");
+    session.notify(`Remnic observe failed: ${errorMessage(err)}`, "warning");
   }
 }
 
@@ -432,8 +462,8 @@ function fileDetailsFromPreparation(preparation: any): { readFiles: string[]; mo
   };
 }
 
-function restoreObservedState(ctx: any, observedHashes: Set<string>): void {
-  for (const entry of safeEntries(ctx)) {
+function restoreObservedState(session: PiContextSnapshot, observedHashes: Set<string>): void {
+  for (const entry of session.entries) {
     if (entry?.type !== "custom" || entry.customType !== STATE_CUSTOM_TYPE) continue;
     const hashes = entry.data?.observedHashes;
     if (Array.isArray(hashes)) {
@@ -467,12 +497,11 @@ function consumeLiveObservedReplayKey(liveObservedReplayKeys: Map<string, number
 }
 
 function skipLiveObservedReplayMessages(
-  ctx: any,
+  sessionKey: string,
   rawMessages: unknown[],
   liveObservedReplayKeys: Map<string, number>,
 ): unknown[] {
   if (liveObservedReplayKeys.size === 0) return rawMessages;
-  const sessionKey = sessionKeyFromContext(ctx);
   const unobserved: unknown[] = [];
   for (const raw of rawMessages) {
     const message = toObserveMessage(raw);
@@ -496,13 +525,80 @@ function persistObservedState(pi: PiApi, observedHashes: Set<string>): void {
   });
 }
 
-async function setStatus(ctx: any, client: RemnicClient, config: RemnicPiConfig): Promise<void> {
+async function setStatus(session: PiContextSnapshot, client: RemnicClient, config: RemnicPiConfig): Promise<void> {
   try {
     await client.health({ timeoutMs: config.startupRequestTimeoutMs });
-    ctx.ui?.setStatus?.("remnic", `Remnic ${config.namespace ? `(${config.namespace})` : "ready"}`);
+    session.setStatus("remnic", `Remnic ${config.namespace ? `(${config.namespace})` : "ready"}`);
   } catch {
-    ctx.ui?.setStatus?.("remnic", "Remnic offline");
+    session.setStatus("remnic", "Remnic offline");
   }
+}
+
+function snapshotPiContext(ctx: any): PiContextSnapshot {
+  const sessionKey = safeSessionKeyFromContext(ctx);
+  const cwd = safeStringRead(() => ctx?.cwd, "");
+  const hasUI = safeRead(() => ctx?.hasUI, undefined) === false;
+  const ui = hasUI ? undefined : safeRead(() => ctx?.ui, undefined);
+  const compact = safeRead(() => ctx?.compact, undefined);
+  return {
+    sessionKey,
+    cwd,
+    entries: safeEntries(ctx),
+    branch: safeBranch(ctx),
+    notify: makeNotifier(ui, hasUI),
+    setStatus: makeStatusSetter(ui, hasUI),
+    compact: typeof compact === "function" ? () => compact.call(ctx) : undefined,
+  };
+}
+
+function safeSessionKeyFromContext(ctx: any): string {
+  try {
+    return sessionKeyFromContext(ctx);
+  } catch {
+    return "pi:default";
+  }
+}
+
+function makeNotifier(ui: unknown, hasUI: boolean): NotifyFn {
+  if (hasUI || !isRecord(ui) || typeof ui.notify !== "function") {
+    return () => undefined;
+  }
+  const notifyFn = ui.notify;
+  return (message, level) => {
+    try {
+      notifyFn.call(ui, message, level);
+    } catch {
+      // Pi invalidates session-bound UI objects during reload/replacement. A
+      // notification failure must not tear down Remnic's hooks.
+    }
+  };
+}
+
+function makeStatusSetter(ui: unknown, hasUI: boolean): PiContextSnapshot["setStatus"] {
+  if (hasUI || !isRecord(ui) || typeof ui.setStatus !== "function") {
+    return () => undefined;
+  }
+  const setStatusFn = ui.setStatus;
+  return (key, value) => {
+    try {
+      setStatusFn.call(ui, key, value);
+    } catch {
+      // See makeNotifier: stale UI should not make extension startup fail.
+    }
+  };
+}
+
+function safeRead<T>(read: () => T, fallback: T): T {
+  try {
+    return read();
+  } catch {
+    return fallback;
+  }
+}
+
+function safeStringRead(read: () => unknown, fallback: string): string {
+  const value = safeRead(read, fallback);
+  return typeof value === "string" ? value : fallback;
 }
 
 function safeEntries(ctx: any): any[] {
@@ -559,11 +655,6 @@ function trimContext(value: string, budget: number): string {
   if (value.length <= budget) return value;
   if (budget <= TRUNCATION_NOTICE.length) return TRUNCATION_NOTICE.slice(0, budget);
   return `${value.slice(0, budget - TRUNCATION_NOTICE.length)}${TRUNCATION_NOTICE}`;
-}
-
-function notify(ctx: any, message: string, level: "info" | "success" | "warning" | "error"): void {
-  if (ctx?.hasUI === false) return;
-  ctx?.ui?.notify?.(message, level);
 }
 
 function errorMessage(err: unknown): string {
