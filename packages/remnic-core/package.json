@@ -2880,6 +2880,7 @@
     "@sinclair/typebox": "^0.34.0",
     "apache-arrow": "^18.1.0",
     "better-sqlite3": "^12.6.2",
+    "cross-spawn": "^7.0.6",
     "meilisearch": "^0.46.0",
     "node-gyp": "^12.3.0",
     "openai": "^6.0.0",
@@ -2892,6 +2893,7 @@
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",
+    "@types/cross-spawn": "^6.0.6",
     "tsup": "^8.5.1",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3"

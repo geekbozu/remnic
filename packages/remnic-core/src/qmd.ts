@@ -1404,8 +1404,15 @@ export class QmdClient implements SearchBackend {
   }
 
   private async probeCli(): Promise<boolean> {
+    let configuredProbeFailure: string | null = null;
     const markProbeFailure = (err: unknown): void => {
       this.lastCliProbeError = err instanceof Error ? err.message : String(err);
+    };
+    const restoreConfiguredProbeFailure = (): void => {
+      if (!this.configuredQmdPath || !configuredProbeFailure) return;
+      this.qmdPath = this.configuredQmdPath;
+      this.qmdPathSource = "configured";
+      this.lastCliProbeError = configuredProbeFailure;
     };
     const recordProbeSuccess = async (
       result: { stdout: string; stderr: string },
@@ -1428,6 +1435,7 @@ export class QmdClient implements SearchBackend {
         return true;
       } catch (err) {
         markProbeFailure(err);
+        configuredProbeFailure = this.lastCliProbeError;
         // Do not hard-fail here: fall through to PATH/fallback probing.
         // This keeps recall healthy even when configured path is stale.
         this.logCliProbeWarning(
@@ -1456,6 +1464,7 @@ export class QmdClient implements SearchBackend {
         }
       }
       this.available = false;
+      restoreConfiguredProbeFailure();
       return false;
     }
   }

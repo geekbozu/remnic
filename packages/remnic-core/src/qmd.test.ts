@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
 
 import { parseConfig } from "./config.js";
@@ -146,6 +148,36 @@ test("post-install auto-upgrade probes PATH qmd before stale fallback paths", ()
   assert.deepEqual(getQmdPostInstallProbeTargets("/custom/qmd", "configured"), [
     { qmdPath: "qmd", source: "auto-path" },
   ]);
+});
+
+test("QmdClient preserves configured qmdPath diagnostics when all probes fail", async () => {
+  const { QmdClient } = await import("./qmd.js");
+  const originalPath = process.env.PATH;
+  const originalWindowsPath = process.env.Path;
+  const missingQmdPath = path.join(
+    os.tmpdir(),
+    `remnic-missing-qmd-${process.pid}-${Date.now()}`,
+    "qmd.cmd",
+  );
+
+  process.env.PATH = "";
+  process.env.Path = "";
+  try {
+    const client = new QmdClient("test-collection", 10, { qmdPath: missingQmdPath });
+
+    assert.equal(await client.probe(), false);
+    const status = client.debugStatus();
+
+    assert.ok(status.includes(`cliPath=${missingQmdPath}`), status);
+    assert.ok(status.includes("cliPathSource=configured"), status);
+    assert.ok(status.includes(`cliProbeError=spawn ${missingQmdPath}`), status);
+    assert.ok(!status.includes("/opt/homebrew/bin/qmd"), status);
+  } finally {
+    if (originalPath === undefined) delete process.env.PATH;
+    else process.env.PATH = originalPath;
+    if (originalWindowsPath === undefined) delete process.env.Path;
+    else process.env.Path = originalWindowsPath;
+  }
 });
 
 test("QmdClient applies chunk strategy to normal and forced embed args", async () => {
