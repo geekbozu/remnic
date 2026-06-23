@@ -269,12 +269,18 @@ test("admin console collects runtime config patch from model and feature control
       values: { modelSource: "plugin" },
     },
     harnesses: [],
-    models: [{ id: "llama3.2", label: "llama3.2", provider: "ollama", detected: true, enabled: true }],
+    models: [{
+      id: "llama3.2",
+      label: "llama3.2",
+      provider: "ollama",
+      detected: true,
+      enabled: true,
+      endpoint: "http://ollama:11434",
+    }],
     features: [{ key: "qmdEnabled", label: "QMD Search", enabled: false, writable: true }],
   });
   const toggle = featureToggleList.children[0]?.children[0]?.children[1];
   if (toggle) toggle.checked = true;
-  localLlmUrlInput.value = "http://ollama:11434";
   gatewayAgentIdInput.value = "sage-router";
   defaultModelSelect.value = "ollama\tllama3.2";
 

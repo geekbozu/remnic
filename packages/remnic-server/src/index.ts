@@ -485,6 +485,7 @@ async function detectOllamaModels(baseUrl: string | undefined): Promise<RemnicAd
         detected: true,
         enabled: true,
         source: "ollama",
+        endpoint,
       }));
   } catch {
     return [];

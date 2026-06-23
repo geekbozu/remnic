@@ -82,6 +82,7 @@ export interface RemnicAdminModelOption {
   enabled: boolean;
   default?: boolean;
   source?: string;
+  endpoint?: string;
 }
 
 export interface RemnicAdminFeatureStatus {

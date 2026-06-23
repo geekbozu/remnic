@@ -167,10 +167,17 @@ function renderDefaultModelSelect(models, values) {
     const option = document.createElement("option");
     option.value = `${model.provider}\t${model.id}`;
     option.textContent = `${model.label || model.id} (${model.provider})`;
+    if (model.endpoint) option.dataset.endpoint = model.endpoint;
     select.appendChild(option);
   });
   const current = selectDefaultModelValue(candidates, values);
   if (current) select.value = current;
+}
+
+function selectedDefaultModelOption(select) {
+  if (!select) return null;
+  const options = select.options || select.children || [];
+  return Array.from(options).find((option) => option.value === select.value) || null;
 }
 
 function renderFeatureToggles(features) {
@@ -237,6 +244,7 @@ function collectRuntimePatch() {
   patch.gatewayAgentId = readOptionalInput("gatewayAgentIdInput");
 
   const selectedModel = $("defaultModelSelect")?.value || "";
+  const selectedOption = selectedDefaultModelOption($("defaultModelSelect"));
   const [provider, id] = selectedModel.split("\t");
   if (provider && id) {
     if (provider === "gateway") {
@@ -245,6 +253,9 @@ function collectRuntimePatch() {
     } else if (provider === "local" || provider === "ollama") {
       patch.localLlmEnabled = true;
       patch.localLlmModel = id;
+      if (provider === "ollama" && selectedOption?.dataset?.endpoint) {
+        patch.localLlmUrl = selectedOption.dataset.endpoint;
+      }
     } else if (provider === "openai") {
       patch.modelSource = "plugin";
       patch.model = id;

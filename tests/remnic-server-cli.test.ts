@@ -575,14 +575,15 @@ test("admin dashboard discovers Ollama models from OLLAMA_HOST when localLlmUrl 
     assert.equal(response.status, 200);
     const body = await response.json() as {
       providers?: Array<{ id?: string; detected?: boolean; enabled?: boolean }>;
-      models?: Array<{ id?: string; provider?: string; source?: string }>;
+      models?: Array<{ id?: string; provider?: string; source?: string; endpoint?: string }>;
     };
     assert.equal(body.providers?.find((provider) => provider.id === "ollama")?.detected, true);
     assert.equal(body.providers?.find((provider) => provider.id === "ollama")?.enabled, true);
     assert.ok(body.models?.some((model) => (
       model.provider === "ollama" &&
       model.id === "llama3.2" &&
-      model.source === "ollama"
+      model.source === "ollama" &&
+      model.endpoint === "http://ollama:11434"
     )));
   } finally {
     await result.stop();
