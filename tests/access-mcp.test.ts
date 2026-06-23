@@ -642,6 +642,45 @@ test("MCP capsule tools reject invalid arguments before calling service", async 
   assert.equal(listCalls, 0);
 });
 
+test("MCP day_summary tolerates injected git context keys", async () => {
+  let request: unknown;
+  const service = {
+    ...createFakeService(),
+    daySummary: async (body: unknown) => {
+      request = body;
+      return {
+        summary: "done",
+        bullets: [],
+        next_actions: [],
+        risks_or_open_loops: [],
+      };
+    },
+  } as unknown as EngramAccessService;
+  const server = new EngramMcpServer(service);
+
+  const response = await server.handleRequest({
+    jsonrpc: "2.0",
+    id: 1,
+    method: "tools/call",
+    params: {
+      name: "engram.day_summary",
+      arguments: {
+        namespace: "global",
+        timeZone: "America/Chicago",
+        cwd: "/tmp/project",
+        projectTag: "blend-supply",
+      },
+    },
+  });
+
+  const result = response?.result as { isError?: boolean };
+  assert.equal(result?.isError, false);
+  assert.deepEqual(request, {
+    namespace: "global",
+    timeZone: "America/Chicago",
+  });
+});
+
 test("engram.dreams_status rejects invalid windowHours without calling service", async () => {
   let capturedWindowHours: number | undefined;
   let calls = 0;

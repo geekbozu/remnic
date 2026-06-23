@@ -46,6 +46,19 @@ const sessionKeySchema = z.string().trim().min(1).max(512).optional();
 const idempotencyKeySchema = z.string().trim().min(1).max(256).optional();
 const dryRunSchema = z.boolean().optional();
 const schemaVersionSchema = z.number().int().optional();
+const timeZoneSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(128)
+  .refine((value) => {
+    try {
+      Intl.DateTimeFormat(undefined, { timeZone: value });
+      return true;
+    } catch {
+      return false;
+    }
+  }, "must be a valid IANA timezone");
 
 // ---------------------------------------------------------------------------
 // Recall
@@ -330,6 +343,7 @@ export const daySummaryRequestSchema = z.object({
   memories: z.string().max(100000).optional(),
   sessionKey: sessionKeySchema,
   namespace: namespaceSchema,
+  timeZone: timeZoneSchema.optional(),
 });
 
 // ---------------------------------------------------------------------------

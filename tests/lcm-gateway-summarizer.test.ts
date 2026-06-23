@@ -9,9 +9,63 @@ import { setCodexCliFallbackRunnerForProcess } from "@remnic/core";
 import { Orchestrator } from "../src/orchestrator.js";
 import { parseConfig } from "../src/config.js";
 
-test("LCM summarization uses gateway internal LLM when modelSource is gateway", async () => {
+type CapturedGatewayCall = {
+  modelId: string;
+  agentPrompt: string;
+  timeoutMs?: number;
+};
+
+function makeGatewayConfig() {
+  return {
+    agents: {
+      defaults: {
+        model: { primary: "default-provider/default-model" },
+      },
+      list: [
+        {
+          id: "main-agent",
+          name: "Main Remnic provider",
+          model: { primary: "main-provider/main-model" },
+        },
+        {
+          id: "fast-agent",
+          name: "Fast Remnic provider",
+          model: { primary: "fast-provider/fast-model" },
+        },
+      ],
+    },
+    models: {
+      providers: {
+        "default-provider": {
+          baseUrl: "codex-cli://local",
+          api: "codex-cli",
+          models: [{ id: "default-model", name: "default-model" }],
+        },
+        "main-provider": {
+          baseUrl: "codex-cli://local",
+          api: "codex-cli",
+          models: [{ id: "main-model", name: "main-model" }],
+        },
+        "fast-provider": {
+          baseUrl: "codex-cli://local",
+          api: "codex-cli",
+          models: [{ id: "fast-model", name: "fast-model" }],
+        },
+        "task-provider": {
+          baseUrl: "codex-cli://local",
+          api: "codex-cli",
+          models: [{ id: "task-model", name: "task-model" }],
+        },
+      },
+    },
+  };
+}
+
+async function captureLcmGatewaySummary(
+  overrides: Record<string, unknown> = {},
+): Promise<CapturedGatewayCall[]> {
   const memoryDir = await mkdtemp(path.join(os.tmpdir(), "remnic-lcm-gateway-"));
-  const calls: Array<{ modelId: string; agentPrompt: string; timeoutMs?: number }> = [];
+  const calls: CapturedGatewayCall[] = [];
   const restoreRunner = setCodexCliFallbackRunnerForProcess(
     async (request) => {
       calls.push({
@@ -34,32 +88,9 @@ test("LCM summarization uses gateway internal LLM when modelSource is gateway", 
       localLlmEnabled: false,
       localLlmFastTimeoutMs: 1234,
       modelSource: "gateway",
-      gatewayAgentId: "remnic-bench-internal",
-      fastGatewayAgentId: "remnic-bench-internal",
-      gatewayConfig: {
-        agents: {
-          defaults: {
-            model: { primary: "remnic-bench-internal/gpt-5.5" },
-          },
-          list: [
-            {
-              id: "remnic-bench-internal",
-              name: "Remnic bench internal provider",
-              model: { primary: "remnic-bench-internal/gpt-5.5" },
-            },
-          ],
-        },
-        models: {
-          providers: {
-            "remnic-bench-internal": {
-              baseUrl: "codex-cli://local",
-              api: "codex-cli",
-              codexCliReasoningEffort: "xhigh",
-              models: [{ id: "gpt-5.5", name: "gpt-5.5" }],
-            },
-          },
-        },
-      },
+      gatewayAgentId: "main-agent",
+      gatewayConfig: makeGatewayConfig(),
+      ...overrides,
     }),
   );
 
@@ -81,10 +112,7 @@ test("LCM summarization uses gateway internal LLM when modelSource is gateway", 
 
     const stats = await orchestrator.lcmEngine!.getStats("session-1");
     assert.equal(stats.totalSummaryNodes, 1);
-    assert.equal(calls.length, 1);
-    assert.equal(calls[0]?.modelId, "gpt-5.5");
-    assert.equal(calls[0]?.timeoutMs, 1234);
-    assert.match(calls[0]?.agentPrompt ?? "", /gateway too/);
+    return [...calls];
   } finally {
     restoreRunner();
     const teardown = orchestrator as unknown as {
@@ -106,4 +134,32 @@ test("LCM summarization uses gateway internal LLM when modelSource is gateway", 
     orchestrator.lcmEngine?.close();
     await rm(memoryDir, { recursive: true, force: true });
   }
+}
+
+test("LCM summarization uses gateway internal LLM when modelSource is gateway", async () => {
+  const calls = await captureLcmGatewaySummary();
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]?.modelId, "main-model");
+  assert.equal(calls[0]?.timeoutMs, 1234);
+  assert.match(calls[0]?.agentPrompt ?? "", /gateway too/);
+});
+
+test("LCM summarization uses taskModelChain when no fast gateway persona is configured", async () => {
+  const calls = await captureLcmGatewaySummary({
+    taskModelChain: { primary: "task-provider/task-model" },
+  });
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]?.modelId, "task-model");
+});
+
+test("LCM summarization preserves fastGatewayAgentId over taskModelChain", async () => {
+  const calls = await captureLcmGatewaySummary({
+    fastGatewayAgentId: "fast-agent",
+    taskModelChain: { primary: "task-provider/task-model" },
+  });
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]?.modelId, "fast-model");
 });

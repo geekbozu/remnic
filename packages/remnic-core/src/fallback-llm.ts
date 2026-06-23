@@ -109,10 +109,26 @@ const LEGACY_PROVIDER_IDS = new Set(["openai-codex", "claude-cli"]);
 const MANAGED_SECRETREF_MARKER = ["secretref", "managed"].join("-");
 const PROVIDER_API_KEY_FIELD = ["api", "Key"].join("") as keyof ModelProviderConfig;
 
+/**
+ * Built-in provider fallbacks for providers that are commonly configured via
+ * OAuth or gateway-managed auth rather than an explicit apiKey in
+ * openclaw.json. These entries let resolveProviderConfig() succeed so the
+ * chain proceeds to tryModel() → resolveRuntimeAuth(), which is where the
+ * gateway's native OAuth token exchange happens.
+ *
+ * Without these, OAuth-only providers like `openai` are rejected with
+ * "provider not found" before runtime auth is ever attempted.
+ */
 const BUILT_IN_PROVIDER_FALLBACKS: Record<string, ModelProviderConfig> = {
   anthropic: {
     baseUrl: "https://api.anthropic.com/v1",
     api: "anthropic-messages",
+    models: [],
+    [PROVIDER_API_KEY_FIELD]: MANAGED_SECRETREF_MARKER,
+  },
+  openai: {
+    baseUrl: "https://api.openai.com/v1",
+    api: "openai-responses",
     models: [],
     [PROVIDER_API_KEY_FIELD]: MANAGED_SECRETREF_MARKER,
   },

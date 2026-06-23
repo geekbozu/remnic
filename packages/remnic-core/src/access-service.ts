@@ -425,6 +425,7 @@ export interface EngramAccessDaySummaryRequest {
   memories?: string;
   sessionKey?: string;
   namespace?: string;
+  timeZone?: string;
 }
 
 /** Inputs accepted by the `remnic_briefing` MCP tool. */
@@ -2021,7 +2022,9 @@ export class EngramAccessService {
 
     if (memories.length === 0) {
       // Auto-gather today's facts from the resolved namespace
-      return this.orchestrator.generateDaySummaryAuto(namespace);
+      return this.orchestrator.generateDaySummaryAuto(namespace, {
+        timeZone: request.timeZone,
+      });
     }
     return this.orchestrator.generateDaySummary(memories);
   }

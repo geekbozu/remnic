@@ -3361,6 +3361,11 @@
         "default": true,
         "description": "Enable end-of-day summary generation via engram.day_summary MCP tool"
       },
+      "daySummaryTimezone": {
+        "type": "string",
+        "default": "",
+        "description": "Timezone for the day summary cron (e.g. 'America/Lima'). When empty, uses the server timezone."
+      },
       "summaryRecallHours": {
         "type": "number",
         "default": 24,

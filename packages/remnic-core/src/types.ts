@@ -945,6 +945,8 @@ export interface PluginConfig {
   // Hourly summaries
   hourlySummariesEnabled: boolean;
   daySummaryEnabled: boolean;
+  /** Timezone override for the day summary cron (issue #1475). */
+  daySummaryTimezone?: string;
   /** If true, Engram may attempt to auto-register an hourly summary cron job (default off). */
   hourlySummaryCronAutoRegister: boolean;
   /** If true, Engram may attempt to auto-register the nightly governance cron job (default off). */
@@ -1280,6 +1282,8 @@ export interface PluginConfig {
    * consolidation. When set, this chain is resolved through gateway providers
    * instead of using gatewayAgentId or agents.defaults.model. All task paths
    * route through the shared `gatewayTaskChainOptions` helper.
+   * LCM summarization is the one fast-tier exception: if `fastGatewayAgentId`
+   * is configured, LCM uses that persona before falling back to this chain.
    *
    * Only takes effect when `modelSource: "gateway"`; ignored (with a startup
    * warning) under `modelSource: "plugin"`. See issue #1365 / PR #1370.

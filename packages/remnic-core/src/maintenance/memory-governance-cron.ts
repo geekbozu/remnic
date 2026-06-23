@@ -72,7 +72,11 @@ export async function ensureCronJob(
   jobsPath: string,
   jobId: string,
   buildJob: () => Record<string, unknown>,
-  options: { updateExisting?: boolean; updateFields?: string[] } = {},
+  options: {
+    updateExisting?: boolean;
+    updateFields?: string[];
+    deepMerge?: Record<string, unknown>;
+  } = {},
 ): Promise<{ created: boolean; updated: boolean; jobId: string }> {
   const releaseLock = await acquireCronJobsLock(jobsPath);
   try {
@@ -87,7 +91,7 @@ export async function ensureCronJob(
 
       const desired = buildJob();
       const existing = jobs[existingIndex];
-      const next = mergeCronJobUpdate(existing, desired, options.updateFields);
+      const next = mergeCronJobUpdate(existing, desired, options.updateFields, options.deepMerge);
       if (stableJson(existing) === stableJson(next)) {
         return { created: false, updated: false, jobId };
       }
@@ -107,23 +111,56 @@ export async function ensureCronJob(
   }
 }
 
+function deepMergeObjects(
+  target: Record<string, unknown>,
+  source: Record<string, unknown>,
+): Record<string, unknown> {
+  const result = { ...target };
+  for (const [key, value] of Object.entries(source)) {
+    if (value === null) {
+      // null means "remove this key"
+      delete result[key];
+    } else if (
+      value && typeof value === "object" && !Array.isArray(value) &&
+      result[key] && typeof result[key] === "object" && !Array.isArray(result[key])
+    ) {
+      result[key] = deepMergeObjects(
+        result[key] as Record<string, unknown>,
+        value as Record<string, unknown>,
+      );
+    } else {
+      result[key] = value;
+    }
+  }
+  return result;
+}
+
 function mergeCronJobUpdate(
   existing: Record<string, unknown>,
   desired: Record<string, unknown>,
   updateFields?: string[],
+  deepMerge?: Record<string, unknown>,
 ): Record<string, unknown> {
-  if (!updateFields) {
+  let next = { ...existing };
+
+  if (!updateFields && !deepMerge) {
     return desired;
   }
 
-  const next = { ...existing };
-  for (const field of updateFields) {
-    if (Object.prototype.hasOwnProperty.call(desired, field)) {
-      next[field] = desired[field];
-    } else {
-      delete next[field];
+  if (updateFields) {
+    for (const field of updateFields) {
+      if (Object.prototype.hasOwnProperty.call(desired, field)) {
+        next[field] = desired[field];
+      } else {
+        delete next[field];
+      }
     }
   }
+
+  if (deepMerge) {
+    next = deepMergeObjects(next, deepMerge);
+  }
+
   return next;
 }
 
@@ -146,34 +183,80 @@ export async function ensureDaySummaryCron(
   options: {
     timezone: string;
     agentId?: string;
+    /** Whether agentId was explicitly provided (vs defaulted to "main"). */
+    hasExplicitAgentId?: boolean;
+    /** Optional model override (e.g. from summaryModel or taskModelChain.primary). */
+    model?: string;
+    /** Optional fallbacks to include alongside the model. */
+    fallbacks?: string[];
   },
-): Promise<{ created: boolean; jobId: string }> {
+): Promise<{ created: boolean; updated: boolean; jobId: string }> {
   const agentId =
     typeof options.agentId === "string" && options.agentId.trim().length > 0
       ? options.agentId.trim()
       : "main";
+  const daySummaryParams = JSON.stringify({ timeZone: options.timezone });
 
-  return ensureCronJob(jobsPath, DAY_SUMMARY_CRON_ID, () => ({
-    id: DAY_SUMMARY_CRON_ID,
-    agentId,
-    name: "Remnic Day Summary (auto)",
-    enabled: true,
-    schedule: {
-      kind: "cron",
-      expr: "47 23 * * *",
-      tz: options.timezone,
+  const payload: Record<string, unknown> = {
+    kind: "agentTurn",
+    timeoutSeconds: 900,
+    thinking: "off",
+    message:
+      `You are OpenClaw automation. Call tool engram.day_summary with params ${daySummaryParams} (it will auto-gather today's facts for that timezone). If successful output exactly NO_REPLY. On error output one concise line. Do NOT use message tool.`,
+  };
+  if (options.model) {
+    payload.model = options.model;
+  }
+  if (options.fallbacks && options.fallbacks.length > 0) {
+    payload.fallbacks = options.fallbacks;
+  }
+
+  return ensureCronJob(
+    jobsPath,
+    DAY_SUMMARY_CRON_ID,
+    () => ({
+      id: DAY_SUMMARY_CRON_ID,
+      agentId,
+      name: "Remnic Day Summary (auto)",
+      enabled: true,
+      schedule: {
+        kind: "cron",
+        expr: "47 23 * * *",
+        tz: options.timezone,
+      },
+      sessionTarget: "isolated",
+      wakeMode: "now",
+      // Mirror model at job root for backward compat with older OpenClaw
+      // builds that read root model instead of payload.model.
+      ...(options.model ? { model: options.model } : {}),
+      payload,
+      delivery: { mode: "none" },
+    }),
+    // Reconcile on every startup so model/timezone changes propagate.
+    // Issue #1474 (model reconcile) + #1475 (timezone reconcile).
+    // Only update managed leaves to avoid clobbering user edits to
+    // schedule.expr, payload.message, payload.timeoutSeconds, etc.
+    // Only reconcile agentId when explicitly provided, so manually-set
+    // cron personas are preserved.
+    {
+      updateExisting: true,
+      updateFields: options.hasExplicitAgentId ? ["agentId"] : [],
+      deepMerge: {
+        schedule: { tz: options.timezone },
+        // Mirror model at job root for backward compat with older OpenClaw
+        // builds that read root model instead of payload.model.
+        model: options.model ?? null,
+        // Always write model/fallbacks so stale values are cleared when
+        // an operator removes summaryModel or taskModelChain from config.
+        payload: {
+          model: options.model ?? null,
+          fallbacks: (options.fallbacks && options.fallbacks.length > 0)
+            ? options.fallbacks
+            : null,
+        },
+      },
     },
-    sessionTarget: "isolated",
-    wakeMode: "now",
-    payload: {
-      kind: "agentTurn",
-      timeoutSeconds: 900,
-      thinking: "off",
-      message:
-        "You are OpenClaw automation. Call tool engram.day_summary with empty params (it will auto-gather today's facts). If successful output exactly NO_REPLY. On error output one concise line. Do NOT use message tool.",
-    },
-    delivery: { mode: "none" },
-  }));
+  );
 }
 
 export async function ensureNightlyGovernanceCron(
