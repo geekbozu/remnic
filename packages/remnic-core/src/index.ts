@@ -341,7 +341,15 @@ export {
 // ---------------------------------------------------------------------------
 
 export { EngramAccessService, EngramAccessInputError } from "./access-service.js";
-export { EngramAccessHttpServer } from "./access-http.js";
+export {
+  EngramAccessHttpServer,
+  type RemnicAdminConfigPatch,
+  type RemnicAdminControls,
+  type RemnicAdminDashboardStatus,
+  type RemnicAdminFeatureStatus,
+  type RemnicAdminHarnessStatus,
+  type RemnicAdminModelOption,
+} from "./access-http.js";
 export { EngramMcpServer } from "./access-mcp.js";
 
 // agentAccessHttp.authToken SecretRef resolution (issue #757). Exposed so

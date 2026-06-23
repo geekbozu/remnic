@@ -14,7 +14,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import { parseConfig, isOpenaiApiKeyDisabled, Orchestrator, EngramAccessService, EngramAccessHttpServer, initLogger, log, getAllValidTokens, getAllValidTokensCached, expandTildePath, type PluginConfig } from "@remnic/core";
+import { parseConfig, isOpenaiApiKeyDisabled, Orchestrator, EngramAccessService, EngramAccessHttpServer, initLogger, log, getAllValidTokens, getAllValidTokensCached, expandTildePath, type PluginConfig, type RemnicAdminControls, type RemnicAdminDashboardStatus, type RemnicAdminModelOption, type RemnicAdminConfigPatch } from "@remnic/core";
 
 // ── Config loading ──────────────────────────────────────────────────────────
 
@@ -28,6 +28,7 @@ export interface ServerConfig {
     maxBodyBytes?: number;
     adminConsoleEnabled?: boolean;
     adminConsolePublicDir?: string;
+    adminConsolePrefillToken?: boolean;
   };
 }
 
@@ -97,6 +98,7 @@ export interface ParsedServerConfig {
   maxBodyBytes?: number;
   adminConsoleEnabled: boolean;
   adminConsolePublicDir?: string;
+  adminConsolePrefillToken: boolean;
 }
 
 export function parseServerConfig(
@@ -113,6 +115,7 @@ export function parseServerConfig(
     maxBodyBytes: parseOptionalPositiveInteger(raw.maxBodyBytes, "server.maxBodyBytes"),
     adminConsoleEnabled: parseOptionalBoolean(raw.adminConsoleEnabled, "server.adminConsoleEnabled") ?? false,
     adminConsolePublicDir: parseOptionalString(raw.adminConsolePublicDir, "server.adminConsolePublicDir"),
+    adminConsolePrefillToken: parseOptionalBoolean(raw.adminConsolePrefillToken, "server.adminConsolePrefillToken") ?? false,
   };
 }
 
@@ -209,9 +212,15 @@ function envOverrides(): Partial<ServerConfig["server"]> & { remnic?: Record<str
   const port = readCompatEnv("REMNIC_PORT", "ENGRAM_PORT");
   const host = readCompatEnv("REMNIC_HOST", "ENGRAM_HOST");
   const authToken = readCompatEnv("REMNIC_AUTH_TOKEN", "ENGRAM_AUTH_TOKEN");
+  const adminConsoleEnabled = readCompatEnv("REMNIC_ADMIN_CONSOLE_ENABLED", "ENGRAM_ADMIN_CONSOLE_ENABLED");
+  const adminConsolePublicDir = readCompatEnv("REMNIC_ADMIN_CONSOLE_PUBLIC_DIR", "ENGRAM_ADMIN_CONSOLE_PUBLIC_DIR");
+  const adminConsolePrefillToken = readCompatEnv("REMNIC_ADMIN_CONSOLE_PREFILL_TOKEN", "ENGRAM_ADMIN_CONSOLE_PREFILL_TOKEN");
   if (port) overrides.port = port;
   if (host) overrides.host = host;
   if (authToken) overrides.authToken = authToken;
+  if (adminConsoleEnabled) overrides.adminConsoleEnabled = adminConsoleEnabled;
+  if (adminConsolePublicDir) overrides.adminConsolePublicDir = adminConsolePublicDir;
+  if (adminConsolePrefillToken) overrides.adminConsolePrefillToken = adminConsolePrefillToken;
 
   if (process.env.OPENAI_API_KEY) remnic.openaiApiKey = process.env.OPENAI_API_KEY;
   const memoryDir = readCompatEnv("REMNIC_MEMORY_DIR", "ENGRAM_MEMORY_DIR");
@@ -235,6 +244,430 @@ export function mergeRemnicConfigForServer(
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
+
+const WRITABLE_BOOLEAN_CONFIG_KEYS = new Set([
+  "citationsAutoDetect",
+  "citationsEnabled",
+  "embeddingFallbackEnabled",
+  "enrichmentAutoOnCreate",
+  "enrichmentEnabled",
+  "feedbackEnabled",
+  "hostEmbeddingProviderEnabled",
+  "localLlmDisableThinking",
+  "localLlmEnabled",
+  "localLlmFallback",
+  "localLlmFastEnabled",
+  "memoryExtensionsEnabled",
+  "namespacesEnabled",
+  "qmdEnabled",
+  "queryExpansionEnabled",
+  "recallPlannerEnabled",
+  "recallPlannerLlmEnabled",
+  "recallPlannerTelemetryEnabled",
+  "rerankEnabled",
+]);
+
+const WRITABLE_STRING_CONFIG_KEYS = new Set([
+  "embeddingFallbackModel",
+  "embeddingFallbackProvider",
+  "fastGatewayAgentId",
+  "gatewayAgentId",
+  "localLlmFastModel",
+  "localLlmModel",
+  "localLlmUrl",
+  "model",
+  "modelSource",
+  "openaiBaseUrl",
+  "qmdEmbedModel",
+  "qmdGenerateModel",
+  "qmdRerankModel",
+  "recallPlannerModel",
+]);
+
+function isWritableConfigKey(key: string): boolean {
+  return WRITABLE_BOOLEAN_CONFIG_KEYS.has(key) || WRITABLE_STRING_CONFIG_KEYS.has(key);
+}
+
+function hasEnv(name: string): boolean {
+  const value = process.env[name];
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+function fileExists(candidate: string): boolean {
+  try {
+    return fs.existsSync(expandTildePath(candidate));
+  } catch {
+    return false;
+  }
+}
+
+function canWriteConfigPath(configPath: string): boolean {
+  try {
+    if (fs.existsSync(configPath)) {
+      fs.accessSync(configPath, fs.constants.W_OK);
+      return true;
+    }
+    fs.accessSync(path.dirname(configPath), fs.constants.W_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function writeConfigFileAtomically(configPath: string, data: Record<string, unknown>): void {
+  fs.mkdirSync(path.dirname(configPath), { recursive: true });
+  const tmpPath = path.join(
+    path.dirname(configPath),
+    `.${path.basename(configPath)}.tmp-${process.pid}-${Date.now()}`,
+  );
+  let completed = false;
+  try {
+    fs.writeFileSync(tmpPath, `${JSON.stringify(data, null, 2)}\n`, {
+      encoding: "utf8",
+      flag: "wx",
+      mode: 0o600,
+    });
+    fs.renameSync(tmpPath, configPath);
+    try {
+      fs.chmodSync(configPath, 0o600);
+    } catch {
+      // Best effort for platforms/filesystems that do not support chmod.
+    }
+    completed = true;
+  } finally {
+    if (!completed) {
+      try {
+        fs.unlinkSync(tmpPath);
+      } catch {
+        // Best effort cleanup for failed writes.
+      }
+    }
+  }
+}
+
+function readJsonRecordIfPresent(configPath: string): Record<string, unknown> {
+  if (!fs.existsSync(configPath)) return {};
+  const parsed = JSON.parse(fs.readFileSync(configPath, "utf8"));
+  if (!isPlainRecord(parsed)) {
+    throw new Error(`Invalid config file ${configPath}: top-level config must be a JSON object`);
+  }
+  return parsed;
+}
+
+function resolveEditableRemnicBlock(root: Record<string, unknown>): Record<string, unknown> {
+  if (isPlainRecord(root.remnic)) return root.remnic;
+  if (isPlainRecord(root.engram)) return root.engram;
+  return root;
+}
+
+function normalizePatchValue(key: string, value: unknown): string | boolean | null {
+  if (!isWritableConfigKey(key)) {
+    throw new Error(`Unsupported admin config key: ${key}`);
+  }
+  if (value === null) return null;
+  if (WRITABLE_BOOLEAN_CONFIG_KEYS.has(key)) {
+    if (typeof value === "boolean") return value;
+    throw new Error(`Invalid ${key}: expected boolean or null`);
+  }
+  if (typeof value !== "string") {
+    throw new Error(`Invalid ${key}: expected string or null`);
+  }
+  const normalized = value.trim();
+  if (key === "modelSource" && normalized !== "plugin" && normalized !== "gateway") {
+    throw new Error("Invalid modelSource: expected plugin or gateway");
+  }
+  if (
+    key === "embeddingFallbackProvider" &&
+    normalized !== "auto" &&
+    normalized !== "openai" &&
+    normalized !== "local"
+  ) {
+    throw new Error("Invalid embeddingFallbackProvider: expected auto, openai, or local");
+  }
+  return normalized;
+}
+
+function publicConfigValues(config: PluginConfig, serverConfig: ParsedServerConfig): Record<string, string | number | boolean | null> {
+  return {
+    adminConsoleEnabled: serverConfig.adminConsoleEnabled,
+    memoryDir: config.memoryDir,
+    model: config.model,
+    modelSource: config.modelSource,
+    gatewayAgentId: config.gatewayAgentId || null,
+    fastGatewayAgentId: config.fastGatewayAgentId || null,
+    localLlmEnabled: config.localLlmEnabled,
+    localLlmUrl: config.localLlmUrl || null,
+    localLlmModel: config.localLlmModel || null,
+    localLlmFastEnabled: config.localLlmFastEnabled,
+    localLlmFastModel: config.localLlmFastModel || null,
+    localLlmFallback: config.localLlmFallback,
+    localLlmDisableThinking: config.localLlmDisableThinking,
+    qmdEnabled: config.qmdEnabled,
+    qmdEmbedModel: config.qmdEmbedModel || null,
+    qmdRerankModel: config.qmdRerankModel || null,
+    qmdGenerateModel: config.qmdGenerateModel || null,
+    embeddingFallbackEnabled: config.embeddingFallbackEnabled,
+    embeddingFallbackProvider: config.embeddingFallbackProvider,
+    embeddingFallbackModel: config.embeddingFallbackModel || null,
+    hostEmbeddingProviderEnabled: config.hostEmbeddingProviderEnabled,
+    namespacesEnabled: config.namespacesEnabled,
+    recallPlannerEnabled: config.recallPlannerEnabled,
+    recallPlannerLlmEnabled: config.recallPlannerLlmEnabled,
+    recallPlannerModel: config.recallPlannerModel || null,
+    citationsEnabled: config.citationsEnabled,
+    citationsAutoDetect: config.citationsAutoDetect,
+    queryExpansionEnabled: config.queryExpansionEnabled,
+    rerankEnabled: config.rerankEnabled,
+    feedbackEnabled: config.feedbackEnabled,
+    memoryExtensionsEnabled: config.memoryExtensionsEnabled,
+    enrichmentEnabled: config.enrichmentEnabled,
+    enrichmentAutoOnCreate: config.enrichmentAutoOnCreate,
+  };
+}
+
+function configuredModels(config: PluginConfig): RemnicAdminModelOption[] {
+  const models = new Map<string, RemnicAdminModelOption>();
+  const add = (id: string | undefined, provider: string, label: string, enabled: boolean, isDefault = false, source = "config") => {
+    const normalized = id?.trim();
+    if (!normalized) return;
+    const existing = models.get(`${provider}:${normalized}`);
+    models.set(`${provider}:${normalized}`, {
+      id: normalized,
+      provider,
+      label,
+      detected: existing?.detected ?? true,
+      enabled: existing?.enabled || enabled,
+      default: existing?.default || isDefault,
+      source,
+    });
+  };
+
+  add(config.model, "openai", config.model, !isOpenaiApiKeyDisabled(config.openaiApiKey), config.modelSource === "plugin");
+  add(config.gatewayAgentId, "gateway", config.gatewayAgentId, config.modelSource === "gateway", config.modelSource === "gateway");
+  add(config.fastGatewayAgentId, "gateway", config.fastGatewayAgentId, config.modelSource === "gateway");
+  add(config.localLlmModel, "local", config.localLlmModel, config.localLlmEnabled, config.localLlmEnabled);
+  add(config.localLlmFastModel, "local", `${config.localLlmFastModel} (fast)`, config.localLlmFastEnabled);
+  add(config.embeddingFallbackModel, config.embeddingFallbackProvider, `${config.embeddingFallbackModel} (embedding fallback)`, config.embeddingFallbackEnabled);
+  add(config.qmdEmbedModel, "qmd", `${config.qmdEmbedModel} (embed)`, config.qmdEnabled);
+  add(config.qmdRerankModel, "qmd", `${config.qmdRerankModel} (rerank)`, config.qmdEnabled);
+  add(config.qmdGenerateModel, "qmd", `${config.qmdGenerateModel} (generate)`, config.qmdEnabled);
+  add(config.recallPlannerModel, "planner", `${config.recallPlannerModel} (planner)`, config.recallPlannerLlmEnabled);
+
+  return [...models.values()].sort((a, b) => `${a.provider}:${a.id}`.localeCompare(`${b.provider}:${b.id}`));
+}
+
+function isLikelyOllamaEndpoint(endpoint: string): boolean {
+  return /(?:ollama|11434)/i.test(endpoint);
+}
+
+async function detectOllamaModels(baseUrl: string | undefined): Promise<RemnicAdminModelOption[]> {
+  const configuredEndpoint = baseUrl?.trim();
+  const envEndpoint = process.env.OLLAMA_HOST?.trim();
+  const endpoint =
+    configuredEndpoint && isLikelyOllamaEndpoint(configuredEndpoint)
+      ? configuredEndpoint
+      : envEndpoint;
+  if (!endpoint) return [];
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 900);
+  try {
+    const url = new URL("/api/tags", endpoint.endsWith("/") ? endpoint : `${endpoint}/`);
+    const response = await fetch(url, { signal: controller.signal });
+    if (!response.ok) return [];
+    const payload = await response.json() as { models?: Array<{ name?: unknown; model?: unknown }> };
+    return (payload.models ?? [])
+      .map((model) => typeof model.name === "string" ? model.name : typeof model.model === "string" ? model.model : "")
+      .filter((name) => name.length > 0)
+      .map((name) => ({
+        id: name,
+        label: name,
+        provider: "ollama",
+        detected: true,
+        enabled: true,
+        source: "ollama",
+        endpoint,
+      }));
+  } catch {
+    return [];
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function dashboardHarnesses(config: PluginConfig) {
+  const openclawDetected = hasEnv("OPENCLAW_HOME") || hasEnv("OPENCLAW_WORKSPACE") || fileExists("~/.openclaw");
+  const codexDetected = hasEnv("CODEX_HOME") || fileExists("~/.codex/auth.json") || fileExists("~/.codex");
+  return [
+    {
+      id: "remnic-http",
+      label: "Remnic HTTP API",
+      detected: true,
+      enabled: true,
+      source: "server",
+      detail: "MCP and REST access server",
+    },
+    {
+      id: "openclaw",
+      label: "OpenClaw",
+      detected: openclawDetected,
+      enabled: config.modelSource === "gateway" || config.hostEmbeddingProviderEnabled,
+      source: openclawDetected ? "host" : "not detected",
+      detail: "Gateway and host adapters",
+    },
+    {
+      id: "codex",
+      label: "Codex",
+      detected: codexDetected,
+      enabled: config.citationsEnabled || config.citationsAutoDetect,
+      source: codexDetected ? "host" : "not detected",
+      detail: "Citation-aware adapter",
+    },
+    {
+      id: "qmd",
+      label: "QMD Search",
+      detected: Boolean(config.qmdPath) || config.qmdEnabled,
+      enabled: config.qmdEnabled,
+      source: config.qmdPath ? "qmdPath" : "config",
+      detail: config.qmdSearchStrategy,
+    },
+  ];
+}
+
+function dashboardProviders(config: PluginConfig) {
+  const localLlmUrl = config.localLlmUrl || "";
+  const gatewayIds = [config.gatewayAgentId, config.fastGatewayAgentId].filter(Boolean).join(" ");
+  const openaiBaseUrl = process.env.OPENAI_BASE_URL || "";
+  const sageRouterDetected =
+    hasEnv("SAGE_ROUTER_URL") ||
+    hasEnv("SAGE_ROUTER_HOST") ||
+    /sage[-_ ]?router/i.test(`${gatewayIds} ${openaiBaseUrl}`);
+  const ollamaDetected = hasEnv("OLLAMA_HOST") || /(?:ollama|11434)/i.test(localLlmUrl);
+  const localDetected = Boolean(localLlmUrl.trim());
+
+  return [
+    {
+      id: "openai",
+      label: "OpenAI",
+      detected: !isOpenaiApiKeyDisabled(config.openaiApiKey),
+      enabled: config.modelSource === "plugin" && !isOpenaiApiKeyDisabled(config.openaiApiKey),
+      source: !isOpenaiApiKeyDisabled(config.openaiApiKey) ? "config/env" : "disabled",
+      detail: config.model,
+    },
+    {
+      id: "sage-router",
+      label: "Sage Router",
+      detected: sageRouterDetected,
+      enabled: config.modelSource === "gateway" && sageRouterDetected,
+      source: sageRouterDetected ? "gateway/env" : "not detected",
+      detail: config.gatewayAgentId || config.fastGatewayAgentId || openaiBaseUrl || "OpenAI-compatible provider router",
+    },
+    {
+      id: "ollama",
+      label: "Ollama",
+      detected: ollamaDetected,
+      enabled: config.localLlmEnabled && ollamaDetected,
+      source: ollamaDetected ? "localLlmUrl/OLLAMA_HOST" : "not detected",
+      detail: "Local or cloud-compatible Ollama endpoint",
+    },
+    {
+      id: "local-openai-compatible",
+      label: "Local OpenAI-compatible",
+      detected: localDetected && !ollamaDetected,
+      enabled: config.localLlmEnabled && localDetected && !ollamaDetected,
+      source: localDetected ? "localLlmUrl" : "not detected",
+      detail: localLlmUrl || "Local provider endpoint",
+    },
+  ];
+}
+
+function dashboardFeatures(config: PluginConfig) {
+  return [
+    ["localLlmEnabled", "Local LLM", config.localLlmEnabled],
+    ["localLlmFastEnabled", "Fast Local Tier", config.localLlmFastEnabled],
+    ["qmdEnabled", "QMD Search", config.qmdEnabled],
+    ["embeddingFallbackEnabled", "Embedding Fallback", config.embeddingFallbackEnabled],
+    ["hostEmbeddingProviderEnabled", "Host Embeddings", config.hostEmbeddingProviderEnabled],
+    ["namespacesEnabled", "Namespaces", config.namespacesEnabled],
+    ["recallPlannerEnabled", "Recall Planner", config.recallPlannerEnabled],
+    ["recallPlannerLlmEnabled", "Planner LLM", config.recallPlannerLlmEnabled],
+    ["citationsEnabled", "Citations", config.citationsEnabled],
+    ["citationsAutoDetect", "Citation Auto-detect", config.citationsAutoDetect],
+    ["queryExpansionEnabled", "Query Expansion", config.queryExpansionEnabled],
+    ["rerankEnabled", "Rerank", config.rerankEnabled],
+    ["feedbackEnabled", "Feedback", config.feedbackEnabled],
+    ["memoryExtensionsEnabled", "Memory Extensions", config.memoryExtensionsEnabled],
+    ["enrichmentEnabled", "Entity Enrichment", config.enrichmentEnabled],
+  ].map(([key, label, enabled]) => ({
+    key: String(key),
+    label: String(label),
+    enabled: enabled === true,
+    writable: WRITABLE_BOOLEAN_CONFIG_KEYS.has(String(key)),
+    restartRequired: true,
+  }));
+}
+
+function createAdminControls(
+  configPath: string,
+  config: PluginConfig,
+  serverConfig: ParsedServerConfig,
+): RemnicAdminControls {
+  let restartRequired = false;
+  let displayConfig = config;
+  const status = async (): Promise<RemnicAdminDashboardStatus> => {
+    const models = configuredModels(displayConfig);
+    const ollamaModels = await detectOllamaModels(displayConfig.localLlmUrl);
+    const modelKeys = new Set(models.map((model) => `${model.provider}:${model.id}`));
+    for (const model of ollamaModels) {
+      if (!modelKeys.has(`${model.provider}:${model.id}`)) models.push(model);
+    }
+    return {
+      config: {
+        path: configPath,
+        exists: fs.existsSync(configPath),
+        writable: canWriteConfigPath(configPath),
+        restartRequired,
+        values: publicConfigValues(displayConfig, serverConfig),
+      },
+      harnesses: dashboardHarnesses(displayConfig),
+      providers: dashboardProviders(displayConfig),
+      models,
+      features: dashboardFeatures(displayConfig),
+    };
+  };
+
+  return {
+    status,
+    update: async (patch: RemnicAdminConfigPatch): Promise<RemnicAdminDashboardStatus> => {
+      if (!isPlainRecord(patch)) {
+        throw new Error("Admin config patch must be an object");
+      }
+      const normalizedEntries = Object.entries(patch).map(([key, value]) => [key, normalizePatchValue(key, value)] as const);
+      if (normalizedEntries.length === 0) return status();
+
+      const raw = readJsonRecordIfPresent(configPath);
+      const target = resolveEditableRemnicBlock(raw);
+      for (const [key, value] of normalizedEntries) {
+        if (value === null) {
+          delete target[key];
+        } else {
+          target[key] = value;
+        }
+      }
+
+      const candidateRemnic = isPlainRecord(raw.remnic)
+        ? raw.remnic
+        : isPlainRecord(raw.engram)
+          ? raw.engram
+          : raw;
+      const nextDisplayConfig = parseConfig(candidateRemnic);
+
+      writeConfigFileAtomically(configPath, raw);
+      displayConfig = nextDisplayConfig;
+      restartRequired = true;
+      return status();
+    },
+  };
+}
 
 /**
  * Like `setTimeout` wrapped in a Promise, but respects an `AbortSignal`.
@@ -346,6 +779,10 @@ export async function startServer(options?: {
     adminConsoleEnabled: parsedServerConfig.adminConsoleEnabled,
     adminConsolePublicDir: parsedServerConfig.adminConsolePublicDir
       ? path.resolve(expandTildePath(parsedServerConfig.adminConsolePublicDir))
+      : undefined,
+    adminConsolePrefillToken: parsedServerConfig.adminConsolePrefillToken,
+    adminControls: parsedServerConfig.adminConsoleEnabled
+      ? createAdminControls(resolvedConfigPath.path, config, parsedServerConfig)
       : undefined,
     citationsEnabled: config.citationsEnabled,
     citationsAutoDetect: config.citationsAutoDetect,
@@ -521,6 +958,8 @@ Environment:
   REMNIC_PORT          Server port (ENGRAM_PORT also supported)
   REMNIC_HOST          Bind address (ENGRAM_HOST also supported)
   REMNIC_AUTH_TOKEN    Auth bearer token (ENGRAM_AUTH_TOKEN also supported)
+  REMNIC_ADMIN_CONSOLE_PREFILL_TOKEN
+                       Prefill admin UI with REMNIC_AUTH_TOKEN when true
   REMNIC_MEMORY_DIR    Override memory directory (ENGRAM_MEMORY_DIR also supported)
   OPENAI_API_KEY       OpenAI API key for extraction; ignored when config sets openaiApiKey=false
 `);

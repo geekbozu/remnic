@@ -41,6 +41,8 @@ export interface EngramAccessHttpServerOptions {
   maxBodyBytes?: number;
   adminConsoleEnabled?: boolean;
   adminConsolePublicDir?: string;
+  /** Inject the primary auth token into the admin console shell for trusted launch surfaces. */
+  adminConsolePrefillToken?: boolean;
   trustPrincipalHeader?: boolean;
   /** Enable adapter-based identity resolution from request headers */
   enableAdapters?: boolean;
@@ -52,6 +54,8 @@ export interface EngramAccessHttpServerOptions {
   citationsAutoDetect?: boolean;
   /** Advertise legacy engram.* tool aliases on tools/list (issue #1427). Default true. */
   emitLegacyTools?: boolean;
+  /** Optional authenticated admin dashboard/config controls supplied by the host server. */
+  adminControls?: RemnicAdminControls;
 }
 
 export interface EngramAccessHttpServerStatus {
@@ -59,6 +63,57 @@ export interface EngramAccessHttpServerStatus {
   host: string;
   port: number;
   maxBodyBytes: number;
+}
+
+export interface RemnicAdminHarnessStatus {
+  id: string;
+  label: string;
+  detected: boolean;
+  enabled: boolean;
+  source?: string;
+  detail?: string;
+}
+
+export interface RemnicAdminModelOption {
+  id: string;
+  label: string;
+  provider: string;
+  detected: boolean;
+  enabled: boolean;
+  default?: boolean;
+  source?: string;
+  endpoint?: string;
+}
+
+export interface RemnicAdminFeatureStatus {
+  key: string;
+  label: string;
+  enabled: boolean;
+  writable: boolean;
+  restartRequired?: boolean;
+}
+
+export interface RemnicAdminConfigStatus {
+  path: string;
+  exists: boolean;
+  writable: boolean;
+  restartRequired: boolean;
+  values: Record<string, string | number | boolean | null>;
+}
+
+export interface RemnicAdminDashboardStatus {
+  config: RemnicAdminConfigStatus;
+  harnesses: RemnicAdminHarnessStatus[];
+  providers?: RemnicAdminHarnessStatus[];
+  models: RemnicAdminModelOption[];
+  features: RemnicAdminFeatureStatus[];
+}
+
+export type RemnicAdminConfigPatch = Record<string, unknown>;
+
+export interface RemnicAdminControls {
+  status: () => Promise<RemnicAdminDashboardStatus>;
+  update?: (patch: RemnicAdminConfigPatch) => Promise<RemnicAdminDashboardStatus>;
 }
 
 function resolveDefaultAdminConsolePublicDir(): string {
@@ -210,6 +265,8 @@ export class EngramAccessHttpServer {
   private readonly maxBodyBytes: number;
   private readonly adminConsoleEnabled: boolean;
   private readonly adminConsolePublicDir: string;
+  private readonly adminConsolePrefillToken?: string;
+  private readonly adminControls?: RemnicAdminControls;
   private readonly trustPrincipalHeader: boolean;
   private readonly adapterRegistry: AdapterRegistry | null;
   private readonly writeRequestTimestamps: number[] = [];
@@ -242,6 +299,8 @@ export class EngramAccessHttpServer {
       : 131072;
     this.adminConsoleEnabled = options.adminConsoleEnabled !== false;
     this.adminConsolePublicDir = options.adminConsolePublicDir ?? defaultAdminConsolePublicDir;
+    this.adminConsolePrefillToken = options.adminConsolePrefillToken === true ? this.authToken : undefined;
+    this.adminControls = options.adminControls;
     this.trustPrincipalHeader = options.trustPrincipalHeader === true;
     this.adapterRegistry = options.enableAdapters !== false
       ? (options.adapterRegistry ?? new AdapterRegistry())
@@ -489,6 +548,38 @@ export class EngramAccessHttpServer {
         registered: this.adapterRegistry?.list() ?? [],
         resolved: identity,
       });
+      return;
+    }
+
+    if (
+      req.method === "GET" &&
+      (pathname === "/engram/v1/admin/dashboard" || pathname === "/remnic/v1/admin/dashboard")
+    ) {
+      if (!this.adminControls) {
+        this.respondJson(res, 404, { error: "admin_controls_unavailable", code: "admin_controls_unavailable" });
+        return;
+      }
+      this.respondJson(res, 200, await this.adminControls.status());
+      return;
+    }
+
+    if (
+      req.method === "PATCH" &&
+      (pathname === "/engram/v1/admin/config" || pathname === "/remnic/v1/admin/config")
+    ) {
+      if (!this.adminControls?.update) {
+        this.respondJson(res, 404, { error: "admin_controls_unavailable", code: "admin_controls_unavailable" });
+        return;
+      }
+      try {
+        this.respondJson(res, 200, await this.adminControls.update(await this.readJsonBody(req)));
+      } catch (error) {
+        throw new HttpError(
+          400,
+          error instanceof Error ? error.message : "invalid_admin_config_patch",
+          "invalid_admin_config_patch",
+        );
+      }
       return;
     }
 
@@ -2244,7 +2335,7 @@ export class EngramAccessHttpServer {
       return true;
     }
     if (pathname === "/remnic/ui/" || pathname === "/engram/ui/") {
-      await this.respondStatic(res, path.join(this.adminConsolePublicDir, "index.html"), "text/html; charset=utf-8");
+      await this.respondAdminConsoleShell(req, res, pathname);
       return true;
     }
     if (pathname === "/remnic/ui/app.js" || pathname === "/engram/ui/app.js") {
@@ -2252,6 +2343,31 @@ export class EngramAccessHttpServer {
       return true;
     }
     return false;
+  }
+
+  private async respondAdminConsoleShell(
+    req: IncomingMessage,
+    res: ServerResponse,
+    pathname: string,
+  ): Promise<void> {
+    try {
+      let body = await readFile(path.join(this.adminConsolePublicDir, "index.html"), "utf-8");
+      const canPrefillToken = this.adminConsolePrefillToken && this.isAuthorized(req, pathname);
+      if (canPrefillToken) {
+        const script = `<script>window.__REMNIC_ADMIN_CONSOLE_PREFILL_TOKEN__=${JSON.stringify(this.adminConsolePrefillToken)};</script>`;
+        body = body.includes("</head>")
+          ? body.replace("</head>", `${script}</head>`)
+          : `${script}${body}`;
+        res.setHeader("cache-control", "private, no-store");
+      }
+      res.setHeader("vary", "authorization");
+      res.statusCode = 200;
+      res.setHeader("content-type", "text/html; charset=utf-8");
+      res.setHeader("content-length", String(Buffer.byteLength(body)));
+      res.end(body);
+    } catch {
+      this.respondJson(res, 404, { error: "not_found" });
+    }
   }
 
   private async respondStatic(res: ServerResponse, filePath: string, contentType: string): Promise<void> {

@@ -9,14 +9,21 @@ class FakeElement {
   textContent = "";
   disabled = false;
   className = "";
+  type = "";
+  checked = false;
   dataset: Record<string, string> = {};
   style: Record<string, string> = {};
+  children: FakeElement[] = [];
 
   addEventListener(): void {}
-  appendChild(): void {}
-  removeChild(): void {}
-  get firstChild(): null {
-    return null;
+  appendChild(child: FakeElement): void {
+    this.children.push(child);
+  }
+  removeChild(child: FakeElement): void {
+    this.children = this.children.filter((candidate) => candidate !== child);
+  }
+  get firstChild(): FakeElement | null {
+    return this.children[0] ?? null;
   }
 }
 
@@ -82,6 +89,18 @@ async function loadAdminConsoleContext(pageSizeValue: string, extraElements: Rec
       createElement() {
         return new FakeElement();
       },
+      querySelectorAll(selector: string) {
+        if (selector !== "#featureToggleList input[data-config-key]") return [];
+        const root = elements.get("featureToggleList");
+        if (!root) return [];
+        const matches: FakeElement[] = [];
+        const visit = (element: FakeElement) => {
+          if (element.dataset.configKey) matches.push(element);
+          element.children.forEach(visit);
+        };
+        visit(root);
+        return matches;
+      },
     },
     window: {
       devicePixelRatio: 1,
@@ -128,6 +147,8 @@ async function loadAdminConsoleContext(pageSizeValue: string, extraElements: Rec
     ) => Map<string, string>,
     applyGraphEvent: vm.runInContext("applyGraphEvent", context) as (event: AppEvent) => void,
     loadMemoryGraph: vm.runInContext("loadMemoryGraph", context) as () => Promise<void>,
+    renderRuntimeDashboard: vm.runInContext("renderRuntimeDashboard", context) as (payload: unknown) => void,
+    collectRuntimePatch: vm.runInContext("collectRuntimePatch", context) as () => Record<string, unknown>,
     _orphanEdgeQueue: vm.runInContext("_orphanEdgeQueue", context) as OrphanEdge[],
     getContext: () => context,
   };
@@ -180,6 +201,97 @@ test("admin console copy path fails cleanly when no memory is selected", async (
 
   assert.equal(detailStatus.textContent, "No memory path to copy.");
   assert.equal(detailStatus.className, "status error");
+});
+
+test("admin console renders runtime dashboard controls", async () => {
+  const runtimeStatus = new FakeElement();
+  const defaultModelSelect = new FakeElement();
+  const featureToggleList = new FakeElement();
+  const { renderRuntimeDashboard } = await loadAdminConsoleContext("25", {
+    runtimeStatus,
+    runtimeConfigPath: new FakeElement(),
+    localLlmUrlInput: new FakeElement(),
+    localLlmModelInput: new FakeElement(),
+    gatewayAgentIdInput: new FakeElement(),
+    modelSourceSelect: new FakeElement(),
+    defaultModelSelect,
+    harnessList: new FakeElement(),
+    modelList: new FakeElement(),
+    featureToggleList,
+  });
+
+  renderRuntimeDashboard({
+    config: {
+      path: "/data/config.json",
+      writable: true,
+      restartRequired: false,
+      values: {
+        modelSource: "plugin",
+        model: "gpt-4.1-mini",
+        localLlmUrl: "http://ollama:11434",
+      },
+    },
+    harnesses: [{ id: "openclaw", label: "OpenClaw", detected: true, enabled: true }],
+    models: [{ id: "gpt-4.1-mini", label: "GPT-4.1 mini", provider: "openai", detected: true, enabled: true, default: true }],
+    features: [{ key: "qmdEnabled", label: "QMD Search", enabled: true, writable: true }],
+  });
+
+  assert.equal(defaultModelSelect.value, "openai\tgpt-4.1-mini");
+  assert.equal(featureToggleList.children.length, 1);
+  assert.match(runtimeStatus.textContent, /Runtime loaded/);
+  assert.match(runtimeStatus.textContent, /Config writable/);
+});
+
+test("admin console collects runtime config patch from model and feature controls", async () => {
+  const modelSourceSelect = Object.assign(new FakeElement(), { value: "plugin" });
+  const defaultModelSelect = Object.assign(new FakeElement(), { value: "ollama\tllama3.2" });
+  const localLlmUrlInput = new FakeElement();
+  const gatewayAgentIdInput = new FakeElement();
+  const featureToggleList = new FakeElement();
+  const { collectRuntimePatch, renderRuntimeDashboard } = await loadAdminConsoleContext("25", {
+    runtimeStatus: new FakeElement(),
+    runtimeConfigPath: new FakeElement(),
+    localLlmUrlInput,
+    localLlmModelInput: new FakeElement(),
+    gatewayAgentIdInput,
+    modelSourceSelect,
+    defaultModelSelect,
+    harnessList: new FakeElement(),
+    modelList: new FakeElement(),
+    featureToggleList,
+  });
+
+  renderRuntimeDashboard({
+    config: {
+      path: "/data/config.json",
+      writable: true,
+      restartRequired: false,
+      values: { modelSource: "plugin" },
+    },
+    harnesses: [],
+    models: [{
+      id: "llama3.2",
+      label: "llama3.2",
+      provider: "ollama",
+      detected: true,
+      enabled: true,
+      endpoint: "http://ollama:11434",
+    }],
+    features: [{ key: "qmdEnabled", label: "QMD Search", enabled: false, writable: true }],
+  });
+  const toggle = featureToggleList.children[0]?.children[0]?.children[1];
+  if (toggle) toggle.checked = true;
+  gatewayAgentIdInput.value = "sage-router";
+  defaultModelSelect.value = "ollama\tllama3.2";
+
+  assert.deepEqual(JSON.parse(JSON.stringify(collectRuntimePatch())), {
+    modelSource: "plugin",
+    localLlmUrl: "http://ollama:11434",
+    localLlmModel: "llama3.2",
+    gatewayAgentId: "sage-router",
+    localLlmEnabled: true,
+    qmdEnabled: true,
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────

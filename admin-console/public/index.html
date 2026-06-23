@@ -230,6 +230,64 @@
       .subgrid {
         grid-template-columns: repeat(2, minmax(0, 1fr));
       }
+      .runtime-grid {
+        display: grid;
+        grid-template-columns: 0.9fr 1.1fr;
+        gap: 16px;
+        margin-top: 16px;
+      }
+      .runtime-stack,
+      .toggle-list {
+        display: grid;
+        gap: 10px;
+      }
+      .compact-list {
+        display: grid;
+        gap: 8px;
+        max-height: 250px;
+        overflow: auto;
+      }
+      .compact-item {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: rgba(255, 255, 255, 0.74);
+        padding: 10px 12px;
+      }
+      .compact-item strong {
+        display: block;
+        font-size: 0.9rem;
+      }
+      .compact-item .status {
+        font-size: 0.78rem;
+      }
+      .toggle-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: rgba(255, 255, 255, 0.72);
+        padding: 10px 12px;
+      }
+      .toggle-row label {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        flex-direction: row;
+        gap: 10px;
+        width: 100%;
+        text-transform: none;
+        letter-spacing: 0;
+        color: var(--ink);
+      }
+      .toggle-row input[type="checkbox"] {
+        width: auto;
+      }
       /* ── Memory Graph pane ─────────────────────────────────── */
       .graph-wrap {
         position: relative;
@@ -386,6 +444,7 @@
       }
       @media (max-width: 1080px) {
         .grid,
+        .runtime-grid,
         .subgrid,
         .auth-bar,
         .quality-grid {
@@ -406,14 +465,75 @@
 
       <section class="card auth-bar">
         <label>
-          Bearer Token
-          <input id="tokenInput" type="password" placeholder="Paste the Remnic access token" autocomplete="off" />
+          Umbrel App Password / Bearer Token
+          <input
+            id="tokenInput"
+            type="password"
+            placeholder="Paste the default app password shown by Umbrel"
+            autocomplete="off"
+          />
         </label>
         <div class="status" id="authStatus">Waiting for token.</div>
         <div class="toolbar">
           <button class="accent" id="connectButton">Connect</button>
           <button class="secondary" id="clearTokenButton">Clear</button>
         </div>
+      </section>
+
+      <section class="runtime-grid">
+        <div class="card runtime-stack">
+          <h2>Runtime</h2>
+          <div class="status" id="runtimeStatus">Not connected.</div>
+          <label>
+            Config Path
+            <input id="runtimeConfigPath" type="text" readonly value="" placeholder="Not loaded." />
+          </label>
+          <div class="subgrid">
+            <label>
+              Model Source
+              <select id="modelSourceSelect">
+                <option value="plugin">plugin</option>
+                <option value="gateway">gateway</option>
+              </select>
+            </label>
+            <label>
+              Default Model
+              <select id="defaultModelSelect"></select>
+            </label>
+          </div>
+          <div class="subgrid">
+            <label>
+              Local LLM URL
+              <input id="localLlmUrlInput" type="text" placeholder="http://127.0.0.1:11434" />
+            </label>
+            <label>
+              Local Model
+              <input id="localLlmModelInput" type="text" placeholder="nomic-embed-text" />
+            </label>
+          </div>
+          <label>
+            Gateway Agent
+            <input id="gatewayAgentIdInput" type="text" placeholder="agent id" />
+          </label>
+          <div class="toolbar">
+            <button class="accent" id="saveRuntimeConfigButton">Save Runtime</button>
+            <button class="secondary" id="refreshRuntimeButton">Refresh</button>
+          </div>
+        </div>
+
+        <div class="card runtime-stack">
+          <h2>Harnesses</h2>
+          <div class="compact-list" id="harnessList"></div>
+          <h2>Providers</h2>
+          <div class="compact-list" id="providerList"></div>
+          <h2>Models</h2>
+          <div class="compact-list" id="modelList"></div>
+        </div>
+      </section>
+
+      <section class="card" style="margin-top: 16px;">
+        <h2>Optional Features</h2>
+        <div class="toggle-list" id="featureToggleList"></div>
       </section>
 
       <div class="grid">
