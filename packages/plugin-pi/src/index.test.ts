@@ -848,6 +848,73 @@ test("context recall does not load full session history", async (t) => {
   assert.equal(result.messages?.at(-1)?.remnicInjected, true);
 });
 
+test("context recall skips stale Pi ctx before snapshot", async (t) => {
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls += 1;
+    return new Response(JSON.stringify({ context: "should not be used" }), { status: 200 });
+  };
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const { pi, emit } = makePiHarness();
+  const extension = createRemnicPiExtension({
+    config: {
+      ...baseConfig(),
+      authToken: "test-token",
+      observeEnabled: false,
+      compactionEnabled: false,
+      mcpToolsEnabled: false,
+      statusEnabled: false,
+    },
+  });
+  await extension(pi as any);
+
+  const stale = makeStaleCtx({ sessionId: "stale-before-snapshot" });
+  stale.markStale();
+
+  const result = await emit("context", { messages: [{ role: "user", content: "same prompt" }] }, stale.ctx);
+
+  assert.equal(result, undefined);
+  assert.equal(calls, 0);
+  assert.deepEqual(stale.notifications, []);
+});
+
+test("context recall keeps pi:default fallback when session manager is missing", async (t) => {
+  const originalFetch = globalThis.fetch;
+  const recallBodies: Array<Record<string, unknown>> = [];
+  globalThis.fetch = async (_input, init) => {
+    recallBodies.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
+    return new Response(JSON.stringify({ context: "remembered context" }), { status: 200 });
+  };
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const { pi, emit } = makePiHarness();
+  const extension = createRemnicPiExtension({
+    config: {
+      ...baseConfig(),
+      authToken: "test-token",
+      observeEnabled: false,
+      compactionEnabled: false,
+      mcpToolsEnabled: false,
+      statusEnabled: false,
+    },
+  });
+  await extension(pi as any);
+
+  const result = await emit("context", { messages: [{ role: "user", content: "same prompt" }] }, {
+    cwd: "/tmp/remnic-pi",
+  }) as { messages?: Array<Record<string, unknown>> };
+
+  assert.equal(result.messages?.at(-1)?.remnicInjected, true);
+  assert.equal(recallBodies[0]?.sessionKey, "pi:default");
+  assert.equal(recallBodies[0]?.cwd, "/tmp/remnic-pi");
+});
+
 test("recall context truncation stays within the configured budget", async (t) => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async () =>

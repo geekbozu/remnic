@@ -60,6 +60,7 @@ export function createRemnicPiExtension(options: RemnicPiExtensionOptions = {}) 
   return async function remnicPiExtension(pi: PiApi): Promise<void> {
     pi.on("session_start", async (_event, ctx) => {
       const session = snapshotPiContext(ctx, { includeSessionHistory: true });
+      if (!session) return;
       const { state } = getSessionState(session.sessionKey, sessionStates);
       restoreObservedState(session, state.observedHashes);
       if (!config.statusEnabled) return;
@@ -68,6 +69,7 @@ export function createRemnicPiExtension(options: RemnicPiExtensionOptions = {}) 
 
     pi.on("context", async (event, ctx) => {
       const session = snapshotPiContext(ctx);
+      if (!session) return;
       if (!config.recallEnabled || !config.authToken) return;
       const recallTarget = latestUserRecallTarget(Array.isArray(event.messages) ? event.messages : []);
       if (!recallTarget) return;
@@ -98,6 +100,7 @@ export function createRemnicPiExtension(options: RemnicPiExtensionOptions = {}) 
 
     pi.on("message_end", async (event, ctx) => {
       const session = snapshotPiContext(ctx);
+      if (!session) return;
       if (!config.observeEnabled || !isUserMessage(event.message)) return;
       const { state } = getSessionState(session.sessionKey, sessionStates);
       await observeMessagesForSession(session, client, [event.message], state.observedHashes, state.liveObservedReplayKeys);
@@ -105,6 +108,7 @@ export function createRemnicPiExtension(options: RemnicPiExtensionOptions = {}) 
 
     pi.on("turn_end", async (event, ctx) => {
       const session = snapshotPiContext(ctx);
+      if (!session) return;
       if (!config.observeEnabled) return;
       const messages = [event.message, ...(Array.isArray(event.toolResults) ? event.toolResults : [])];
       const { state } = getSessionState(session.sessionKey, sessionStates);
@@ -113,6 +117,7 @@ export function createRemnicPiExtension(options: RemnicPiExtensionOptions = {}) 
 
     pi.on("session_shutdown", async (_event, ctx) => {
       const session = snapshotPiContext(ctx, { includeSessionHistory: true });
+      if (!session) return;
       const { sessionKey, state } = getSessionState(session.sessionKey, sessionStates);
       if (config.observeEnabled) {
         const branchMessages = branchMessagesWithEntryIdentity(session.branch);
@@ -127,6 +132,7 @@ export function createRemnicPiExtension(options: RemnicPiExtensionOptions = {}) 
 
     pi.on("session_before_compact", async (event, ctx) => {
       const session = snapshotPiContext(ctx);
+      if (!session) return;
       if (!config.compactionEnabled || !config.authToken) return;
       const preparation = event.preparation ?? {};
       try {
@@ -248,6 +254,7 @@ function commandHandler(
 ): (args: string, ctx: any) => Promise<void> {
   return async (args, ctx) => {
     const session = snapshotPiContext(ctx);
+    if (!session) return;
     try {
       await handler(args, ctx, session);
     } catch (err) {
@@ -273,6 +280,12 @@ async function registerMcpTools(pi: PiApi, client: RemnicClient, config: RemnicP
       parameters: toPiToolParametersSchema(tool.inputSchema),
       async execute(_toolCallId: string, params: Record<string, unknown>, _signal: AbortSignal | undefined, _onUpdate: unknown, ctx: any) {
         const session = snapshotPiContext(ctx);
+        if (!session) {
+          return {
+            content: [{ type: "text", text: "Remnic tool skipped because the Pi context is no longer active." }],
+            details: { skipped: true, reason: "stale_context" },
+          };
+        }
         const safeParams = stripSessionOwnedRuntimeFields(params ?? {}) as Record<string, unknown>;
         const result = await client.mcpTool(tool.name, {
           ...safeParams,
@@ -387,6 +400,7 @@ export async function observeMessages(
   liveObservedReplayKeys?: Map<string, number>,
 ): Promise<void> {
   const session = snapshotPiContext(ctx);
+  if (!session) return;
   await observeMessagesForSession(session, client, rawMessages, observedHashes, liveObservedReplayKeys);
 }
 
@@ -537,8 +551,9 @@ async function setStatus(session: PiContextSnapshot, client: RemnicClient, confi
   }
 }
 
-function snapshotPiContext(ctx: any, options: PiContextSnapshotOptions = {}): PiContextSnapshot {
+function snapshotPiContext(ctx: any, options: PiContextSnapshotOptions = {}): PiContextSnapshot | null {
   const sessionKey = safeSessionKeyFromContext(ctx);
+  if (!sessionKey) return null;
   const cwd = safeStringRead(() => ctx?.cwd, "");
   const hasUI = safeRead(() => ctx?.hasUI, undefined) === false;
   const ui = hasUI ? undefined : safeRead(() => ctx?.ui, undefined);
@@ -555,11 +570,11 @@ function snapshotPiContext(ctx: any, options: PiContextSnapshotOptions = {}): Pi
   };
 }
 
-function safeSessionKeyFromContext(ctx: any): string {
+function safeSessionKeyFromContext(ctx: any): string | null {
   try {
     return sessionKeyFromContext(ctx);
   } catch {
-    return "pi:default";
+    return null;
   }
 }
 
