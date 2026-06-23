@@ -456,9 +456,18 @@ function configuredModels(config: PluginConfig): RemnicAdminModelOption[] {
   return [...models.values()].sort((a, b) => `${a.provider}:${a.id}`.localeCompare(`${b.provider}:${b.id}`));
 }
 
+function isLikelyOllamaEndpoint(endpoint: string): boolean {
+  return /(?:ollama|11434)/i.test(endpoint);
+}
+
 async function detectOllamaModels(baseUrl: string | undefined): Promise<RemnicAdminModelOption[]> {
-  const endpoint = baseUrl?.trim() || process.env.OLLAMA_HOST?.trim();
-  if (!endpoint || !/(?:ollama|11434)/i.test(endpoint)) return [];
+  const configuredEndpoint = baseUrl?.trim();
+  const envEndpoint = process.env.OLLAMA_HOST?.trim();
+  const endpoint =
+    configuredEndpoint && isLikelyOllamaEndpoint(configuredEndpoint)
+      ? configuredEndpoint
+      : envEndpoint;
+  if (!endpoint) return [];
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 900);
   try {
@@ -771,7 +780,9 @@ export async function startServer(options?: {
       ? path.resolve(expandTildePath(parsedServerConfig.adminConsolePublicDir))
       : undefined,
     adminConsolePrefillToken: parsedServerConfig.adminConsolePrefillToken,
-    adminControls: createAdminControls(resolvedConfigPath.path, config, parsedServerConfig),
+    adminControls: parsedServerConfig.adminConsoleEnabled
+      ? createAdminControls(resolvedConfigPath.path, config, parsedServerConfig)
+      : undefined,
     citationsEnabled: config.citationsEnabled,
     citationsAutoDetect: config.citationsAutoDetect,
     emitLegacyTools: config.emitLegacyTools,
