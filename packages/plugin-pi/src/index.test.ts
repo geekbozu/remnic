@@ -764,15 +764,155 @@ test("empty recall responses do not suppress retry for same query", async (t) =>
   const result = await emit("context", event, ctx) as { messages?: Array<{ content?: Array<{ text?: string }> }> };
 
   assert.equal(calls, 2);
-  assert.ok(result.messages?.[0]?.content?.[0]?.text?.includes("remembered context"));
+  const injected = result.messages?.at(-1);
+  assert.ok(injected?.content?.[0]?.text?.includes("remembered context"));
   assert.equal(
-    (result.messages?.[0] as { excludeFromContext?: unknown } | undefined)?.excludeFromContext,
+    (injected as { excludeFromContext?: unknown } | undefined)?.excludeFromContext,
     undefined,
   );
   assert.equal(
-    (result.messages?.[0] as { remnicInjected?: unknown } | undefined)?.remnicInjected,
+    (injected as { remnicInjected?: unknown } | undefined)?.remnicInjected,
     true,
   );
+});
+
+test("context recall appends injected context after stable conversation history", async (t) => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () =>
+    new Response(JSON.stringify({ context: "remembered context" }), { status: 200 });
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const { pi, emit } = makePiHarness();
+  const extension = createRemnicPiExtension({
+    config: {
+      ...baseConfig(),
+      authToken: "test-token",
+      observeEnabled: false,
+      compactionEnabled: false,
+      mcpToolsEnabled: false,
+      statusEnabled: false,
+    },
+  });
+  await extension(pi as any);
+
+  const firstMessage = { role: "system", content: "stable prefix" };
+  const userMessage = { role: "user", content: "same prompt" };
+  const result = await emit("context", { messages: [firstMessage, userMessage] }, {
+    cwd: "/tmp/remnic-pi",
+    sessionManager: { getSessionId: () => "append-recall-test" },
+  }) as { messages?: Array<Record<string, unknown>> };
+
+  assert.equal(result.messages?.[0], firstMessage);
+  assert.equal(result.messages?.[1], userMessage);
+  assert.equal(result.messages?.[2]?.remnicInjected, true);
+});
+
+test("context recall does not load full session history", async (t) => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () =>
+    new Response(JSON.stringify({ context: "remembered context" }), { status: 200 });
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const { pi, emit } = makePiHarness();
+  const extension = createRemnicPiExtension({
+    config: {
+      ...baseConfig(),
+      authToken: "test-token",
+      observeEnabled: false,
+      compactionEnabled: false,
+      mcpToolsEnabled: false,
+      statusEnabled: false,
+    },
+  });
+  await extension(pi as any);
+
+  const sessionManager = {
+    getSessionId: () => "history-free-context",
+    getEntries: () => {
+      throw new Error("getEntries should not be called");
+    },
+    getBranch: () => {
+      throw new Error("getBranch should not be called");
+    },
+  };
+
+  const result = await emit("context", { messages: [{ role: "user", content: "same prompt" }] }, {
+    cwd: "/tmp/remnic-pi",
+    sessionManager,
+  }) as { messages?: Array<Record<string, unknown>> };
+
+  assert.equal(result.messages?.at(-1)?.remnicInjected, true);
+});
+
+test("context recall skips stale Pi ctx before snapshot", async (t) => {
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls += 1;
+    return new Response(JSON.stringify({ context: "should not be used" }), { status: 200 });
+  };
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const { pi, emit } = makePiHarness();
+  const extension = createRemnicPiExtension({
+    config: {
+      ...baseConfig(),
+      authToken: "test-token",
+      observeEnabled: false,
+      compactionEnabled: false,
+      mcpToolsEnabled: false,
+      statusEnabled: false,
+    },
+  });
+  await extension(pi as any);
+
+  const stale = makeStaleCtx({ sessionId: "stale-before-snapshot" });
+  stale.markStale();
+
+  const result = await emit("context", { messages: [{ role: "user", content: "same prompt" }] }, stale.ctx);
+
+  assert.equal(result, undefined);
+  assert.equal(calls, 0);
+  assert.deepEqual(stale.notifications, []);
+});
+
+test("context recall keeps pi:default fallback when session manager is missing", async (t) => {
+  const originalFetch = globalThis.fetch;
+  const recallBodies: Array<Record<string, unknown>> = [];
+  globalThis.fetch = async (_input, init) => {
+    recallBodies.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
+    return new Response(JSON.stringify({ context: "remembered context" }), { status: 200 });
+  };
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const { pi, emit } = makePiHarness();
+  const extension = createRemnicPiExtension({
+    config: {
+      ...baseConfig(),
+      authToken: "test-token",
+      observeEnabled: false,
+      compactionEnabled: false,
+      mcpToolsEnabled: false,
+      statusEnabled: false,
+    },
+  });
+  await extension(pi as any);
+
+  const result = await emit("context", { messages: [{ role: "user", content: "same prompt" }] }, {
+    cwd: "/tmp/remnic-pi",
+  }) as { messages?: Array<Record<string, unknown>> };
+
+  assert.equal(result.messages?.at(-1)?.remnicInjected, true);
+  assert.equal(recallBodies[0]?.sessionKey, "pi:default");
+  assert.equal(recallBodies[0]?.cwd, "/tmp/remnic-pi");
 });
 
 test("recall context truncation stays within the configured budget", async (t) => {
@@ -802,7 +942,7 @@ test("recall context truncation stays within the configured budget", async (t) =
     sessionManager: { getSessionId: () => "recall-budget-test" },
   }) as { messages?: Array<{ content?: Array<{ text?: string }> }> };
 
-  const text = result.messages?.[0]?.content?.[0]?.text ?? "";
+  const text = result.messages?.at(-1)?.content?.[0]?.text ?? "";
   const context = text.split("Remnic recalled context for this turn:\n\n")[1] ?? "";
   assert.equal(context.length, 40);
   assert.ok(context.endsWith("[Remnic context truncated]"));
@@ -844,6 +984,134 @@ test("failed recall does not suppress retry for same query", async (t) => {
   await emit("context", event, ctx);
 
   assert.equal(calls, 2);
+});
+
+test("context recall failure notification survives stale Pi ctx after await", async (t) => {
+  const originalFetch = globalThis.fetch;
+  const stale = makeStaleCtx({ sessionId: "stale-context-recall" });
+  globalThis.fetch = async () => {
+    stale.markStale();
+    throw new Error("offline");
+  };
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const { pi, emit } = makePiHarness();
+  const extension = createRemnicPiExtension({
+    config: {
+      ...baseConfig(),
+      authToken: "test-token",
+      observeEnabled: false,
+      compactionEnabled: false,
+      mcpToolsEnabled: false,
+      statusEnabled: false,
+    },
+  });
+  await extension(pi as any);
+
+  await assert.doesNotReject(() =>
+    emit("context", { messages: [{ role: "user", content: "same prompt" }] }, stale.ctx)
+  );
+  assert.deepEqual(stale.notifications, [
+    { message: "Remnic recall unavailable: offline", level: "warning" },
+  ]);
+});
+
+test("observe failure notification survives stale Pi ctx after await", async (t) => {
+  const originalFetch = globalThis.fetch;
+  const stale = makeStaleCtx({ sessionId: "stale-observe" });
+  globalThis.fetch = async () => {
+    stale.markStale();
+    throw new Error("observe offline");
+  };
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const { pi, emit } = makePiHarness();
+  const extension = createRemnicPiExtension({
+    config: {
+      ...baseConfig(),
+      authToken: "test-token",
+      recallEnabled: false,
+      compactionEnabled: false,
+      mcpToolsEnabled: false,
+      statusEnabled: false,
+    },
+  });
+  await extension(pi as any);
+
+  await assert.doesNotReject(() =>
+    emit("message_end", { message: { id: "m1", role: "user", content: "remember this" } }, stale.ctx)
+  );
+  assert.deepEqual(stale.notifications, [
+    { message: "Remnic observe failed: observe offline", level: "warning" },
+  ]);
+});
+
+test("compaction failure notification survives stale Pi ctx after await", async (t) => {
+  const originalFetch = globalThis.fetch;
+  const stale = makeStaleCtx({ sessionId: "stale-compaction" });
+  globalThis.fetch = async () => {
+    stale.markStale();
+    throw new Error("flush offline");
+  };
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const { pi, emit } = makePiHarness();
+  const extension = createRemnicPiExtension({
+    config: {
+      ...baseConfig(),
+      authToken: "test-token",
+      recallEnabled: false,
+      observeEnabled: false,
+      mcpToolsEnabled: false,
+      statusEnabled: false,
+    },
+  });
+  await extension(pi as any);
+
+  await assert.doesNotReject(() => emit("session_before_compact", { preparation: {} }, stale.ctx));
+  assert.deepEqual(stale.notifications, [
+    { message: "Remnic LCM flush failed: flush offline", level: "warning" },
+  ]);
+});
+
+test("command handlers notify with captured context after stale Pi ctx", async (t) => {
+  const originalFetch = globalThis.fetch;
+  const stale = makeStaleCtx({ sessionId: "stale-command" });
+  const recallBodies: Array<Record<string, unknown>> = [];
+  globalThis.fetch = async (_input, init) => {
+    recallBodies.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
+    stale.markStale();
+    return new Response(JSON.stringify({ context: "remembered command context" }), { status: 200 });
+  };
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const { pi, runCommand } = makePiHarness();
+  const extension = createRemnicPiExtension({
+    config: {
+      ...baseConfig(),
+      authToken: "test-token",
+      observeEnabled: false,
+      compactionEnabled: false,
+      mcpToolsEnabled: false,
+      statusEnabled: false,
+    },
+  });
+  await extension(pi as any);
+
+  await assert.doesNotReject(() => runCommand("remnic-recall", "same prompt", stale.ctx));
+  assert.equal(recallBodies[0].sessionKey, "pi:stale-command");
+  assert.equal(recallBodies[0].cwd, "/tmp/remnic-pi");
+  assert.deepEqual(stale.notifications, [
+    { message: "remembered command context", level: "info" },
+  ]);
 });
 
 test("registered MCP tools strip nested session-owned params before forwarding", async (t) => {
@@ -969,13 +1237,17 @@ function baseConfig(): RemnicPiConfig {
 function makePiHarness(): {
   pi: Record<string, unknown>;
   emit: (event: string, payload: unknown, ctx: unknown) => Promise<unknown>;
+  runCommand: (name: string, args: string, ctx: unknown) => Promise<void>;
 } {
   const handlers = new Map<string, Array<(event: unknown, ctx: unknown) => unknown | Promise<unknown>>>();
+  const commands = new Map<string, (args: string, ctx: unknown) => Promise<void>>();
   const pi = {
     on: (event: string, handler: (event: unknown, ctx: unknown) => unknown | Promise<unknown>) => {
       handlers.set(event, [...(handlers.get(event) ?? []), handler]);
     },
-    registerCommand: () => undefined,
+    registerCommand: (name: string, options: { handler: (args: string, ctx: unknown) => Promise<void> }) => {
+      commands.set(name, options.handler);
+    },
     registerTool: () => undefined,
     appendEntry: () => undefined,
   };
@@ -988,5 +1260,73 @@ function makePiHarness(): {
       }
       return result;
     },
+    runCommand: async (name, args, ctx) => {
+      const handler = commands.get(name);
+      assert.ok(handler, `missing command ${name}`);
+      await handler(args, ctx);
+    },
+  };
+}
+
+function makeStaleCtx(options: {
+  sessionId: string;
+  cwd?: string;
+  entries?: unknown[];
+  branch?: unknown[];
+}): {
+  ctx: unknown;
+  markStale: () => void;
+  notifications: Array<{ message: string; level: string }>;
+  statuses: Array<{ key: string; value: string }>;
+} {
+  let stale = false;
+  const notifications: Array<{ message: string; level: string }> = [];
+  const statuses: Array<{ key: string; value: string }> = [];
+  const assertActive = () => {
+    if (stale) {
+      throw new Error("This extension ctx is stale after session replacement or reload.");
+    }
+  };
+  const sessionManager = {
+    getSessionId: () => options.sessionId,
+    getEntries: () => options.entries ?? [],
+    getBranch: () => options.branch ?? [],
+  };
+  const ui = {
+    notify(message: string, level: string) {
+      notifications.push({ message, level });
+    },
+    setStatus(key: string, value: string) {
+      statuses.push({ key, value });
+    },
+  };
+
+  return {
+    ctx: {
+      get cwd() {
+        assertActive();
+        return options.cwd ?? "/tmp/remnic-pi";
+      },
+      get hasUI() {
+        assertActive();
+        return true;
+      },
+      get ui() {
+        assertActive();
+        return ui;
+      },
+      get sessionManager() {
+        assertActive();
+        return sessionManager;
+      },
+      compact() {
+        assertActive();
+      },
+    },
+    markStale: () => {
+      stale = true;
+    },
+    notifications,
+    statuses,
   };
 }
