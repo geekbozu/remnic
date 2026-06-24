@@ -1,9 +1,5 @@
-import { createRequire } from "node:module";
+import crossSpawn from "cross-spawn";
 
-const require = createRequire(import.meta.url);
-const PROCESS_MODULE_NAME = `node:${"child"}_${"process"}`;
-
-type ProcessModule = Record<string, unknown>;
 type ProcessOptions = Record<string, unknown>;
 type ProcessStream = {
   destroyed?: boolean;
@@ -22,9 +18,12 @@ type ProcessResult = {
   stderr?: string;
 };
 
-function loadModule(): ProcessModule {
-  return require(PROCESS_MODULE_NAME) as ProcessModule;
-}
+type SpawnApi = {
+  (command: string, args?: readonly string[], options?: ProcessOptions): CommandChildProcess;
+  sync: (command: string, args: readonly string[], options: ProcessOptions) => ProcessResult;
+};
+
+const spawnApi = crossSpawn as unknown as SpawnApi;
 
 export type CommandChildProcess = {
   exitCode?: number | null;
@@ -43,13 +42,7 @@ export function launchProcess(
   args: string[],
   options?: ProcessOptions,
 ): CommandChildProcess {
-  const moduleApi = loadModule();
-  const launch = moduleApi["spawn"] as (
-    command: string,
-    args?: readonly string[],
-    options?: ProcessOptions,
-  ) => CommandChildProcess;
-  return launch(command, args, options);
+  return spawnApi(command, args, options);
 }
 
 export function launchProcessSync(
@@ -57,11 +50,5 @@ export function launchProcessSync(
   args: string[],
   options: ProcessOptions,
 ): ProcessResult {
-  const moduleApi = loadModule();
-  const launchSync = moduleApi["spawnSync"] as (
-    command: string,
-    args: readonly string[],
-    options: ProcessOptions,
-  ) => ProcessResult;
-  return launchSync(command, args, options);
+  return spawnApi.sync(command, args, options);
 }

@@ -42,6 +42,8 @@ export interface QmdClientOptions {
   qmdSearchStrategy?: QmdSearchStrategy;
   /** Subprocess fallback command; default "query" keeps LLM expansion. Issue #1335. */
   qmdSubprocessStrategy?: QmdSubprocessStrategy;
+  /** Override automatic qmd fallback probes; defaults to known install paths. */
+  qmdFallbackPaths?: string[];
   /** Per-call daemon search timeout in ms; default 8000. Issue #1335. */
   qmdDaemonTimeoutMs?: number;
 }
@@ -1248,6 +1250,7 @@ export class QmdClient implements SearchBackend {
   private readonly qmdIndexName?: string;
   private readonly qmdSearchStrategy: QmdSearchStrategy;
   private readonly qmdSubprocessStrategy: QmdSubprocessStrategy;
+  private readonly qmdFallbackPaths: string[];
   private readonly daemonTimeoutMs: number;
   private readonly qmdRuntimeEnv: QmdRuntimeEnv;
   private qmdPathSource: "auto-path" | "auto-fallback" | "configured" = "auto-path";
@@ -1303,6 +1306,9 @@ export class QmdClient implements SearchBackend {
         : "hybrid";
     // Default "query" keeps `qmd query` (LLM expansion + rerank) per gotcha #7. Issue #1335.
     this.qmdSubprocessStrategy = opts?.qmdSubprocessStrategy === "search" ? "search" : "query";
+    this.qmdFallbackPaths = opts?.qmdFallbackPaths
+      ? opts.qmdFallbackPaths.map((candidate) => candidate.trim()).filter(Boolean)
+      : QMD_FALLBACK_PATHS;
     // Default 8000ms preserves the historical hardcoded daemon timeout. Issue #1335.
     // Floor of 1000ms avoids absurdly small values; callers wanting CPU-only HyDE
     // headroom can raise this (e.g. 20000) without code changes.
@@ -1404,8 +1410,15 @@ export class QmdClient implements SearchBackend {
   }
 
   private async probeCli(): Promise<boolean> {
+    let configuredProbeFailure: string | null = null;
     const markProbeFailure = (err: unknown): void => {
       this.lastCliProbeError = err instanceof Error ? err.message : String(err);
+    };
+    const restoreConfiguredProbeFailure = (): void => {
+      if (!this.configuredQmdPath || !configuredProbeFailure) return;
+      this.qmdPath = this.configuredQmdPath;
+      this.qmdPathSource = "configured";
+      this.lastCliProbeError = configuredProbeFailure;
     };
     const recordProbeSuccess = async (
       result: { stdout: string; stderr: string },
@@ -1428,6 +1441,7 @@ export class QmdClient implements SearchBackend {
         return true;
       } catch (err) {
         markProbeFailure(err);
+        configuredProbeFailure = this.lastCliProbeError;
         // Do not hard-fail here: fall through to PATH/fallback probing.
         // This keeps recall healthy even when configured path is stale.
         this.logCliProbeWarning(
@@ -1444,7 +1458,7 @@ export class QmdClient implements SearchBackend {
     } catch (err) {
       markProbeFailure(err);
       // Try fallback paths
-      for (const fallbackPath of QMD_FALLBACK_PATHS) {
+      for (const fallbackPath of this.qmdFallbackPaths) {
         try {
           const result = await runQmd(["--version"], QMD_PROBE_TIMEOUT_MS, fallbackPath, undefined, this.qmdRuntimeEnv);
           await recordProbeSuccess(result, fallbackPath, "auto-fallback");
@@ -1456,6 +1470,7 @@ export class QmdClient implements SearchBackend {
         }
       }
       this.available = false;
+      restoreConfiguredProbeFailure();
       return false;
     }
   }
