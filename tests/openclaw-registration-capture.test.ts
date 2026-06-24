@@ -135,6 +135,26 @@ test("flush plan pins configured gateway task model", async () => {
   });
 });
 
+test("flush plan prompt constrains writes to the allowed flush-plan file", async () => {
+  await withCapturedRegistration((plugin) => {
+    const capture = captureOpenClawRegistrationApi();
+
+    plugin.register(capture.api);
+
+    const [flushPlanResolver] = capture.registrations("registerMemoryFlushPlan")[0] as [
+      () => Record<string, unknown>,
+    ];
+    const plan = flushPlanResolver();
+    const prompt = `${String(plan.prompt)}\n${String(plan.systemPrompt)}`;
+
+    assert.equal(plan.relativePath, "state/plugins/openclaw-remnic/flush-plan.md");
+    assert.match(prompt, /allowed flush-plan file/i);
+    assert.match(prompt, /Do not create files, directories, or dated paths/i);
+    assert.doesNotMatch(prompt, /memory-candidates/i);
+    assert.doesNotMatch(prompt, /memory candidates/i);
+  });
+});
+
 test("split-only SDKs receive runtime and flush-plan registrations without unified capability", async () => {
   await withCapturedRegistration((plugin) => {
     const capture = captureOpenClawRegistrationApi({
