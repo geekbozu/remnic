@@ -151,7 +151,9 @@ function extractRowsFromJson(value: unknown): unknown[] {
   const obj = value as Record<string, unknown>;
   for (const key of ["turns", "messages", "events", "entries", "items"]) {
     const rows = obj[key];
-    if (Array.isArray(rows)) return rows.map((row) => inheritEnvelopeSessionFields(row, obj));
+    if (Array.isArray(rows) && rows.length > 0) {
+      return rows.map((row) => inheritEnvelopeSessionFields(row, obj));
+    }
   }
   return [obj];
 }

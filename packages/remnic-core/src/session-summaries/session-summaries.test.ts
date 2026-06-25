@@ -505,6 +505,35 @@ test("JSON envelope sessionId fields are inherited by child rows", async () => {
   });
 });
 
+test("JSON envelope parsing skips empty row arrays in favor of populated arrays", async () => {
+  await withTempDir(async (dir) => {
+    await writeFile(
+      path.join(dir, "session.json"),
+      JSON.stringify({
+        sessionId: "envelope-session",
+        turns: [],
+        messages: [
+          {
+            role: "user",
+            timestamp: "2026-02-03T00:00:00.000Z",
+            content: "Message content survives empty turns.",
+          },
+        ],
+      }),
+      "utf-8"
+    );
+
+    const report = await collectLocalSessionSummaries({
+      inputDir: dir,
+      includeRedactedExcerpts: true,
+    });
+
+    assert.equal(report.turnsParsed, 1);
+    assert.equal(report.drafts[0].sourceSessionRef, "9a04ff52f050d0b4");
+    assert.equal(report.drafts[0].excerpts?.[0].text, "Message content survives empty turns.");
+  });
+});
+
 test("inputDir supports tilde expansion", async () => {
   const dir = await mkdtemp(path.join(os.homedir(), ".remnic-session-summary-"));
   try {
