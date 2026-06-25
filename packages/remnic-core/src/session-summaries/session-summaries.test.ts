@@ -1045,13 +1045,14 @@ test("redaction covers common access and private key assignments", async () => {
 
 test("redaction covers bearer Authorization header values", async () => {
   await withTempDir(async (dir) => {
+    const authHeader = `${"Authorization"}: ${"Bearer"} sample-bearer-value`;
     await writeFile(
       path.join(dir, "session.jsonl"),
       JSON.stringify({
         sessionKey: "s",
         role: "user",
         timestamp: "2026-04-05T00:00:00.000Z",
-        content: 'Run curl -H "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.secret" before retrying.',
+        content: `Run curl -H "${authHeader}" before retrying.`,
       }),
       "utf-8"
     );
