@@ -26,35 +26,35 @@ export const DEFAULT_REDACTION_RULES: readonly CompiledRedactionRule[] = [
   {
     name: "home-relative-posix-spaced-path",
     pattern:
-      /~\/(?:[A-Za-z0-9._()-]+(?: [A-Za-z0-9._()-]+)*\/)*[A-Za-z0-9._()-]+(?: [A-Za-z0-9._()-]+)+\.[A-Za-z0-9_-]+/g,
+      /~\/(?:[^/\s"',;<>]+(?: [^/\s"',;<>]+)*\/)*[^/\s"',;<>]+(?: (?!(?:before|after|then|and|or)\b)[^/\s"',;<>]+)+\.[^/\s"',;<>]+?(?=$|[\s"',;<>)]|[.,](?:\s|$))/g,
     replacement: "[REDACTED_PATH]",
   },
   {
     name: "home-relative-posix-spaced-extensionless-path",
     pattern:
-      /~\/(?:[A-Za-z0-9._()-]+(?: [A-Za-z0-9._()-]+)*\/)*[A-Za-z0-9._()-]+(?: [A-Za-z0-9._()-]+)+?(?=$|[,;.]|\s+(?:before|after|then|and|or)\b)/gi,
+      /~\/(?:[^/\s"',;<>]+(?: [^/\s"',;<>]+)*\/)*[^/\s"',;<>]+(?: (?!(?:before|after|then|and|or)\b)[^/\s"',;<>]+)+?(?=$|[,;.]|\s+(?:before|after|then|and|or)\b)/gi,
     replacement: "[REDACTED_PATH]",
   },
   {
     name: "home-relative-posix-path",
-    pattern: /~\/(?:[A-Za-z0-9._()-]+(?: [A-Za-z0-9._()-]+)*\/)*[A-Za-z0-9._()-]*[A-Za-z0-9_-]/g,
+    pattern: /~\/(?:[^/\s"',;<>]+(?: [^/\s"',;<>]+)*\/)*[^/\s"',;<>]+?(?=$|[\s"',;<>)]|[.,](?:\s|$))/g,
     replacement: "[REDACTED_PATH]",
   },
   {
     name: "absolute-posix-spaced-path",
     pattern:
-      /\/(?:[A-Za-z0-9._()-]+(?: [A-Za-z0-9._()-]+)*\/)+[A-Za-z0-9._()-]+(?: [A-Za-z0-9._()-]+)+\.[A-Za-z0-9_-]+/g,
+      /\/(?:[^/\s"',;<>]+(?: [^/\s"',;<>]+)*\/)+[^/\s"',;<>]+(?: (?!(?:before|after|then|and|or)\b)[^/\s"',;<>]+)+\.[^/\s"',;<>]+?(?=$|[\s"',;<>)]|[.,](?:\s|$))/g,
     replacement: "[REDACTED_PATH]",
   },
   {
     name: "absolute-posix-spaced-extensionless-path",
     pattern:
-      /\/(?:[A-Za-z0-9._()-]+(?: [A-Za-z0-9._()-]+)*\/)+[A-Za-z0-9._()-]+(?: [A-Za-z0-9._()-]+)+?(?=$|[,;.]|\s+(?:before|after|then|and|or)\b)/gi,
+      /\/(?:[^/\s"',;<>]+(?: [^/\s"',;<>]+)*\/)+[^/\s"',;<>]+(?: (?!(?:before|after|then|and|or)\b)[^/\s"',;<>]+)+?(?=$|[,;.]|\s+(?:before|after|then|and|or)\b)/gi,
     replacement: "[REDACTED_PATH]",
   },
   {
     name: "absolute-posix-path",
-    pattern: /\/(?:[A-Za-z0-9._()-]+(?: [A-Za-z0-9._()-]+)*\/)*[A-Za-z0-9._()-]*[A-Za-z0-9_-]/g,
+    pattern: /\/(?:[^/\s"',;<>]+(?: [^/\s"',;<>]+)*\/)*[^/\s"',;<>]+?(?=$|[\s"',;<>)]|[.,](?:\s|$))/g,
     replacement: "[REDACTED_PATH]",
   },
   {

@@ -877,6 +877,32 @@ test("redaction covers common absolute POSIX paths", async () => {
   });
 });
 
+test("redaction covers POSIX paths with common non-alphanumeric characters", async () => {
+  await withTempDir(async (dir) => {
+    await writeFile(
+      path.join(dir, "session.jsonl"),
+      JSON.stringify({
+        sessionKey: "s",
+        role: "user",
+        timestamp: "2026-04-05T00:00:00.000Z",
+        content:
+          "Inspect /Users/alex/client+secret/file.txt, /Users/alex/team@client/config.json, and /Users/alex/caf\u00e9/notes.md.",
+      }),
+      "utf-8"
+    );
+
+    const report = await collectLocalSessionSummaries({
+      inputDir: dir,
+      includeRedactedExcerpts: true,
+    });
+
+    assert.equal(
+      report.drafts[0].excerpts?.[0].text,
+      "Inspect [REDACTED_PATH], [REDACTED_PATH], and [REDACTED_PATH]."
+    );
+  });
+});
+
 test("redaction covers home-relative POSIX paths with spaced filenames", async () => {
   await withTempDir(async (dir) => {
     await writeFile(
