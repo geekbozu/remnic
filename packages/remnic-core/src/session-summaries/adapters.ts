@@ -113,6 +113,7 @@ function sessionKeyFromRow(row: unknown): string | undefined {
   const obj = row as Record<string, unknown>;
   const payload = objectField(obj.payload);
   const payloadMessage = objectField(payload?.message);
+  const rowType = firstString(obj.type, obj.kind, obj.event)?.toLowerCase();
   return firstString(
     obj.sessionKey,
     obj.session_key,
@@ -124,6 +125,7 @@ function sessionKeyFromRow(row: unknown): string | undefined {
     obj.thread_id,
     obj.transcriptId,
     obj.transcript_id,
+    rowType === "session_meta" ? payload?.id : undefined,
     payload?.sessionKey,
     payload?.session_key,
     payload?.sessionId,

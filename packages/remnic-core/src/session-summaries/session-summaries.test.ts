@@ -221,6 +221,45 @@ test("codex-jsonl parses Codex rollout payload rows", async () => {
   });
 });
 
+test("codex-jsonl inherits legacy session_meta payload ids", async () => {
+  await withTempDir(async (dir) => {
+    const transcriptPath = path.join(dir, "rollout.jsonl");
+    const writeTranscript = async (message: string): Promise<void> => {
+      await writeFile(
+        transcriptPath,
+        [
+          JSON.stringify({
+            type: "session_meta",
+            payload: { id: "legacy-codex-session" },
+          }),
+          JSON.stringify({
+            type: "event_msg",
+            timestamp: "2026-02-03T00:00:00.000Z",
+            payload: { message },
+          }),
+        ].join("\n"),
+        "utf-8"
+      );
+    };
+
+    await writeTranscript("Original message.");
+    const firstReport = await collectLocalSessionSummaries({
+      inputDir: dir,
+      source: "codex-jsonl",
+    });
+
+    await writeTranscript("Changed message.");
+    const secondReport = await collectLocalSessionSummaries({
+      inputDir: dir,
+      source: "codex-jsonl",
+    });
+
+    assert.equal(firstReport.drafts[0].sourceSessionRef, secondReport.drafts[0].sourceSessionRef);
+    assert.equal(firstReport.drafts[0].draftId, secondReport.drafts[0].draftId);
+    assert.equal(firstReport.drafts[0].turnCount, 1);
+  });
+});
+
 test("payload.message metadata contributes session, role, and timestamp", async () => {
   await withTempDir(async (dir) => {
     const transcriptPath = path.join(dir, "nested.jsonl");
