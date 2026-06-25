@@ -66,7 +66,7 @@ export const DEFAULT_REDACTION_RULES: readonly CompiledRedactionRule[] = [
   {
     name: "absolute-windows-spaced-extensionless-path",
     pattern:
-      /\b[A-Za-z]:\\(?:[^\\/:*?"<>|,;\r\n]+\\)*[^\\/:*?"<>|,;\s\r\n]+(?: [^\\/:*?"<>|,;\s\r\n]+)+(?=$|[,;.]|\s+(?:before|after|then|and|or)\b)/gi,
+      /\b[A-Za-z]:\\(?:[^\\/:*?"<>|,;\r\n]+\\)*[^\\/:*?"<>|,;\s\r\n]+(?: [^\\/:*?"<>|,;\s\r\n]+)+(?=$|["'<>)](?!\\)|[,;.]|\s+(?:before|after|then|and|or)\b)/gi,
     replacement: "[REDACTED_PATH]",
   },
   {
@@ -83,7 +83,7 @@ export const DEFAULT_REDACTION_RULES: readonly CompiledRedactionRule[] = [
   {
     name: "unc-windows-spaced-extensionless-path",
     pattern:
-      /\\\\[^\\/:*?"<>|,;\s\r\n]+\\[^\\/:*?"<>|,;\r\n]+\\(?:[^\\/:*?"<>|,;\r\n]+\\)*[^\\/:*?"<>|,;\s\r\n]+(?: [^\\/:*?"<>|,;\s\r\n]+)+(?=$|[,;.]|\s+(?:before|after|then|and|or)\b)/gi,
+      /\\\\[^\\/:*?"<>|,;\s\r\n]+\\[^\\/:*?"<>|,;\r\n]+\\(?:[^\\/:*?"<>|,;\r\n]+\\)*[^\\/:*?"<>|,;\s\r\n]+(?: [^\\/:*?"<>|,;\s\r\n]+)+(?=$|["'<>)](?!\\)|[,;.]|\s+(?:before|after|then|and|or)\b)/gi,
     replacement: "[REDACTED_PATH]",
   },
   {
