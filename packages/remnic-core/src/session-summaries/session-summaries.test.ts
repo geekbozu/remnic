@@ -1043,6 +1043,28 @@ test("redaction covers common access and private key assignments", async () => {
   });
 });
 
+test("redaction covers bearer Authorization header values", async () => {
+  await withTempDir(async (dir) => {
+    await writeFile(
+      path.join(dir, "session.jsonl"),
+      JSON.stringify({
+        sessionKey: "s",
+        role: "user",
+        timestamp: "2026-04-05T00:00:00.000Z",
+        content: 'Run curl -H "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.secret" before retrying.',
+      }),
+      "utf-8"
+    );
+
+    const report = await collectLocalSessionSummaries({
+      inputDir: dir,
+      includeRedactedExcerpts: true,
+    });
+
+    assert.equal(report.drafts[0].excerpts?.[0].text, 'Run curl -H "[REDACTED_SECRET]" before retrying.');
+  });
+});
+
 test("custom redaction rules must be an array", async () => {
   assert.throws(
     () => compileRedactionRules({ rules: { name: "bad", pattern: "bad" } } as never),
