@@ -347,7 +347,7 @@ function pushTurnWithCodexMirrorDedupe(
   }
 
   const existing = codexMirrorTurns.get(key);
-  if (existing && existing.surface !== surface) {
+  if (existing) {
     if (CODEX_MIRROR_SURFACE_PRIORITY[surface] > CODEX_MIRROR_SURFACE_PRIORITY[existing.surface]) {
       turns[existing.index] = turn;
       codexMirrorTurns.set(key, { index: existing.index, surface });
