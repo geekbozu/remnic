@@ -780,6 +780,31 @@ test("redaction covers quoted secret values with spaces", async () => {
   });
 });
 
+test("redaction covers prefixed environment secret keys", async () => {
+  await withTempDir(async (dir) => {
+    await writeFile(
+      path.join(dir, "session.jsonl"),
+      JSON.stringify({
+        sessionKey: "s",
+        role: "user",
+        timestamp: "2026-04-05T00:00:00.000Z",
+        content: 'Use ANTHROPIC_API_KEY="correct horse" and ACCESS_TOKEN=abc123 before running tests.',
+      }),
+      "utf-8"
+    );
+
+    const report = await collectLocalSessionSummaries({
+      inputDir: dir,
+      includeRedactedExcerpts: true,
+    });
+
+    assert.equal(
+      report.drafts[0].excerpts?.[0].text,
+      "Use [REDACTED_SECRET] and [REDACTED_SECRET] before running tests."
+    );
+  });
+});
+
 test("custom redaction rules must be an array", async () => {
   assert.throws(
     () => compileRedactionRules({ rules: { name: "bad", pattern: "bad" } } as never),
@@ -832,6 +857,31 @@ test("redaction covers home-relative POSIX paths with spaced filenames", async (
     });
 
     assert.equal(report.drafts[0].excerpts?.[0].text, "Inspect [REDACTED_PATH] before replying.");
+  });
+});
+
+test("redaction covers extensionless POSIX paths with spaced names", async () => {
+  await withTempDir(async (dir) => {
+    await writeFile(
+      path.join(dir, "session.jsonl"),
+      JSON.stringify({
+        sessionKey: "s",
+        role: "user",
+        timestamp: "2026-04-05T00:00:00.000Z",
+        content: "Open /Users/alex/Secret Project before replying and ~/My Documents/Client Folder after.",
+      }),
+      "utf-8"
+    );
+
+    const report = await collectLocalSessionSummaries({
+      inputDir: dir,
+      includeRedactedExcerpts: true,
+    });
+
+    assert.equal(
+      report.drafts[0].excerpts?.[0].text,
+      "Open [REDACTED_PATH] before replying and [REDACTED_PATH] after."
+    );
   });
 });
 

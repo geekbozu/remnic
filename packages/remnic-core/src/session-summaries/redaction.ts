@@ -4,7 +4,7 @@ export const DEFAULT_REDACTION_RULES: readonly CompiledRedactionRule[] = [
   {
     name: "secret-token",
     pattern:
-      /\b(?:sk-[A-Za-z0-9_-]{12,}|sk-proj-[A-Za-z0-9_-]{12,}|(?:api[_-]?key|token|secret|password)\s*[:=]\s*(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s"',;]+))/gi,
+      /(?<![A-Za-z0-9_])(?:sk-[A-Za-z0-9_-]{12,}|sk-proj-[A-Za-z0-9_-]{12,}|(?:[A-Za-z0-9]+[_-]+)*(?:api[_-]?key|token|secret|password)\s*[:=]\s*(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s"',;]+))/gi,
     replacement: "[REDACTED_SECRET]",
   },
   {
@@ -30,6 +30,12 @@ export const DEFAULT_REDACTION_RULES: readonly CompiledRedactionRule[] = [
     replacement: "[REDACTED_PATH]",
   },
   {
+    name: "home-relative-posix-spaced-extensionless-path",
+    pattern:
+      /~\/(?:[A-Za-z0-9._()-]+(?: [A-Za-z0-9._()-]+)*\/)*[A-Za-z0-9._()-]+(?: [A-Za-z0-9._()-]+)+?(?=$|[,;.]|\s+(?:before|after|then|and|or)\b)/gi,
+    replacement: "[REDACTED_PATH]",
+  },
+  {
     name: "home-relative-posix-path",
     pattern: /~\/(?:[A-Za-z0-9._()-]+(?: [A-Za-z0-9._()-]+)*\/)*[A-Za-z0-9._()-]*[A-Za-z0-9_-]/g,
     replacement: "[REDACTED_PATH]",
@@ -38,6 +44,12 @@ export const DEFAULT_REDACTION_RULES: readonly CompiledRedactionRule[] = [
     name: "absolute-posix-spaced-path",
     pattern:
       /\/(?:[A-Za-z0-9._()-]+(?: [A-Za-z0-9._()-]+)*\/)+[A-Za-z0-9._()-]+(?: [A-Za-z0-9._()-]+)+\.[A-Za-z0-9_-]+/g,
+    replacement: "[REDACTED_PATH]",
+  },
+  {
+    name: "absolute-posix-spaced-extensionless-path",
+    pattern:
+      /\/(?:[A-Za-z0-9._()-]+(?: [A-Za-z0-9._()-]+)*\/)+[A-Za-z0-9._()-]+(?: [A-Za-z0-9._()-]+)+?(?=$|[,;.]|\s+(?:before|after|then|and|or)\b)/gi,
     replacement: "[REDACTED_PATH]",
   },
   {
