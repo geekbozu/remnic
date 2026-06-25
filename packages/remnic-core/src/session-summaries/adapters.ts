@@ -81,20 +81,23 @@ const SESSION_KEY_FIELDS = [
   "transcript_id",
 ] as const;
 
+function hasUsableSessionKeyField(value: unknown): boolean {
+  return (
+    (typeof value === "string" && value.trim().length > 0) ||
+    (typeof value === "number" && Number.isFinite(value))
+  );
+}
+
 function inheritEnvelopeSessionFields(row: unknown, envelope: Record<string, unknown>): unknown {
   if (!row || typeof row !== "object" || Array.isArray(row)) return row;
   const child = row as Record<string, unknown>;
   const inherited: Record<string, unknown> = {};
   for (const key of SESSION_KEY_FIELDS) {
-    if (
-      child[key] === undefined &&
-      ((typeof envelope[key] === "string" && envelope[key].trim().length > 0) ||
-        (typeof envelope[key] === "number" && Number.isFinite(envelope[key])))
-    ) {
+    if (!hasUsableSessionKeyField(child[key]) && hasUsableSessionKeyField(envelope[key])) {
       inherited[key] = envelope[key];
     }
   }
-  return Object.keys(inherited).length > 0 ? { ...inherited, ...child } : row;
+  return Object.keys(inherited).length > 0 ? { ...child, ...inherited } : row;
 }
 
 function codexRoleFromTypes(

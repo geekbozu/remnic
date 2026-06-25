@@ -549,6 +549,62 @@ test("JSON envelope sessionId fields are inherited by child rows", async () => {
   });
 });
 
+test("JSON envelope sessionId fields override unusable child session ids", async () => {
+  await withTempDir(async (dir) => {
+    const transcriptPath = path.join(dir, "session.json");
+    await writeFile(
+      transcriptPath,
+      JSON.stringify({
+        sessionId: "stable-envelope-session",
+        messages: [
+          {
+            sessionId: "",
+            role: "user",
+            timestamp: "2026-02-03T00:00:00.000Z",
+            content: "Original content.",
+          },
+          {
+            sessionId: null,
+            role: "assistant",
+            timestamp: "2026-02-03T00:00:01.000Z",
+            content: "Original reply.",
+          },
+        ],
+      }),
+      "utf-8"
+    );
+    const firstReport = await collectLocalSessionSummaries({ inputDir: dir });
+
+    await writeFile(
+      transcriptPath,
+      JSON.stringify({
+        sessionId: "stable-envelope-session",
+        messages: [
+          {
+            sessionId: "",
+            role: "user",
+            timestamp: "2026-02-03T00:00:00.000Z",
+            content: "Changed content.",
+          },
+          {
+            sessionId: null,
+            role: "assistant",
+            timestamp: "2026-02-03T00:00:01.000Z",
+            content: "Changed reply.",
+          },
+        ],
+      }),
+      "utf-8"
+    );
+    const secondReport = await collectLocalSessionSummaries({ inputDir: dir });
+
+    assert.equal(firstReport.sessionsSummarized, 1);
+    assert.equal(firstReport.drafts[0].turnCount, 2);
+    assert.equal(firstReport.drafts[0].sourceSessionRef, secondReport.drafts[0].sourceSessionRef);
+    assert.equal(firstReport.drafts[0].draftId, secondReport.drafts[0].draftId);
+  });
+});
+
 test("JSON envelope parsing skips empty row arrays in favor of populated arrays", async () => {
   await withTempDir(async (dir) => {
     await writeFile(
@@ -1147,6 +1203,31 @@ test("redaction covers quoted extensionless Windows paths with spaced names", as
     assert.equal(
       report.drafts[0].excerpts?.[0].text,
       'Inspect "[REDACTED_PATH]" and "[REDACTED_PATH]" before replying.'
+    );
+  });
+});
+
+test("redaction covers UNC share roots", async () => {
+  await withTempDir(async (dir) => {
+    await writeFile(
+      path.join(dir, "session.jsonl"),
+      JSON.stringify({
+        sessionKey: "s",
+        role: "user",
+        timestamp: "2026-04-05T00:00:00.000Z",
+        content: 'Inspect \\\\server\\share and "\\\\server\\quoted-share" before replying.',
+      }),
+      "utf-8"
+    );
+
+    const report = await collectLocalSessionSummaries({
+      inputDir: dir,
+      includeRedactedExcerpts: true,
+    });
+
+    assert.equal(
+      report.drafts[0].excerpts?.[0].text,
+      'Inspect [REDACTED_PATH] and "[REDACTED_PATH]" before replying.'
     );
   });
 });

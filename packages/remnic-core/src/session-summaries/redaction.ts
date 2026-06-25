@@ -87,6 +87,11 @@ export const DEFAULT_REDACTION_RULES: readonly CompiledRedactionRule[] = [
     replacement: "[REDACTED_PATH]",
   },
   {
+    name: "unc-windows-share-root",
+    pattern: /\\\\[^\\/:*?"<>|,;\s\r\n]+\\[^\\/:*?"<>|,;\s\r\n]+(?=$|[\s"',;<>)]|[.,](?:\s|$))/g,
+    replacement: "[REDACTED_PATH]",
+  },
+  {
     name: "unc-windows-path",
     pattern: /\\\\[^\\/:*?"<>|,;\s\r\n]+\\[^\\/:*?"<>|,;\r\n]+\\(?:[^\\/:*?"<>|,;\r\n]+\\)*[^\\/:*?"<>|,;\s\r\n]+/g,
     replacement: "[REDACTED_PATH]",
