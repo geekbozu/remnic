@@ -322,12 +322,14 @@ test("codex-jsonl deduplicates same-surface mirrored assistant rows", async () =
         }),
         JSON.stringify({
           type: "response_item",
+          id: "assistant-1",
           sessionKey: "codex-session",
           timestamp: "2026-02-03T00:00:01.000Z",
           payload: { content: [{ type: "output_text", text: "Repeated assistant response." }] },
         }),
         JSON.stringify({
           type: "response_item",
+          id: "assistant-1",
           sessionKey: "codex-session",
           timestamp: "2026-02-03T00:00:02.000Z",
           payload: { content: [{ type: "output_text", text: "Repeated assistant response." }] },
@@ -348,6 +350,50 @@ test("codex-jsonl deduplicates same-surface mirrored assistant rows", async () =
     assert.deepEqual(
       report.drafts[0].excerpts?.map((excerpt) => excerpt.text),
       ["User request.", "Repeated assistant response."]
+    );
+  });
+});
+
+test("codex-jsonl keeps distinct same-text response item rows with different ids", async () => {
+  await withTempDir(async (dir) => {
+    await writeFile(
+      path.join(dir, "rollout.jsonl"),
+      [
+        JSON.stringify({
+          type: "event_msg",
+          sessionKey: "codex-session",
+          timestamp: "2026-02-03T00:00:00.000Z",
+          payload: { message: "User request." },
+        }),
+        JSON.stringify({
+          type: "response_item",
+          id: "assistant-1",
+          sessionKey: "codex-session",
+          timestamp: "2026-02-03T00:00:01.000Z",
+          payload: { content: [{ type: "output_text", text: "OK" }] },
+        }),
+        JSON.stringify({
+          type: "response_item",
+          id: "assistant-2",
+          sessionKey: "codex-session",
+          timestamp: "2026-02-03T00:00:02.000Z",
+          payload: { content: [{ type: "output_text", text: "OK" }] },
+        }),
+      ].join("\n"),
+      "utf-8"
+    );
+
+    const report = await collectLocalSessionSummaries({
+      inputDir: dir,
+      source: "codex-jsonl",
+      includeRedactedExcerpts: true,
+    });
+
+    assert.equal(report.turnsParsed, 3);
+    assert.equal(report.drafts[0].roles.assistant, 2);
+    assert.deepEqual(
+      report.drafts[0].excerpts?.map((excerpt) => excerpt.text),
+      ["User request.", "OK", "OK"]
     );
   });
 });
@@ -432,6 +478,43 @@ test("payload.message metadata contributes session, role, and timestamp", async 
     assert.equal(firstReport.drafts[0].draftId, secondReport.drafts[0].draftId);
     assert.equal(firstReport.drafts[0].roles.assistant, 1);
     assert.equal(firstReport.drafts[0].firstTimestamp, "2026-02-03T00:00:00.000Z");
+  });
+});
+
+test("top-level message metadata contributes stable session ids", async () => {
+  await withTempDir(async (dir) => {
+    const transcriptPath = path.join(dir, "nested-message.jsonl");
+    await writeFile(
+      transcriptPath,
+      JSON.stringify({
+        message: {
+          sessionId: "top-level-message-session",
+          role: "assistant",
+          timestamp: "2026-02-03T00:00:00.000Z",
+          content: "Original nested content.",
+        },
+      }),
+      "utf-8"
+    );
+    const firstReport = await collectLocalSessionSummaries({ inputDir: dir });
+
+    await writeFile(
+      transcriptPath,
+      JSON.stringify({
+        message: {
+          sessionId: "top-level-message-session",
+          role: "assistant",
+          timestamp: "2026-02-03T00:00:00.000Z",
+          content: "Changed nested content.",
+        },
+      }),
+      "utf-8"
+    );
+    const secondReport = await collectLocalSessionSummaries({ inputDir: dir });
+
+    assert.equal(firstReport.drafts[0].sourceSessionRef, secondReport.drafts[0].sourceSessionRef);
+    assert.equal(firstReport.drafts[0].draftId, secondReport.drafts[0].draftId);
+    assert.equal(firstReport.drafts[0].roles.assistant, 1);
   });
 });
 
@@ -1250,6 +1333,32 @@ test("redaction covers extensionless POSIX paths with spaced names", async () =>
     assert.equal(
       report.drafts[0].excerpts?.[0].text,
       "Open [REDACTED_PATH] before replying and [REDACTED_PATH] after."
+    );
+  });
+});
+
+test("redaction covers POSIX paths with connector words in spaced names", async () => {
+  await withTempDir(async (dir) => {
+    await writeFile(
+      path.join(dir, "session.jsonl"),
+      JSON.stringify({
+        sessionKey: "s",
+        role: "user",
+        timestamp: "2026-04-05T00:00:00.000Z",
+        content:
+          'Open /Users/alex/Research and Development before replying and "/Users/alex/Research and Development" after.',
+      }),
+      "utf-8"
+    );
+
+    const report = await collectLocalSessionSummaries({
+      inputDir: dir,
+      includeRedactedExcerpts: true,
+    });
+
+    assert.equal(
+      report.drafts[0].excerpts?.[0].text,
+      'Open [REDACTED_PATH] before replying and "[REDACTED_PATH]" after.'
     );
   });
 });

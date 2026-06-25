@@ -32,7 +32,7 @@ export const DEFAULT_REDACTION_RULES: readonly CompiledRedactionRule[] = [
   {
     name: "home-relative-posix-spaced-extensionless-path",
     pattern:
-      /~\/(?:[^/\s"',;<>]+(?: [^/\s"',;<>]+)*\/)*[^/\s"',;<>]+(?: (?!(?:before|after|then|and|or)\b)[^/\s"',;<>]+)+?(?=$|["'<>)](?!\/)|[,;.]|\s+(?:before|after|then|and|or)\b)/gi,
+      /~\/(?:[^/\s"',;<>]+(?: [^/\s"',;<>]+)*\/)*[^/\s"',;<>]+(?: (?!(?:before|after|then|and(?=\s+[a-z])|or(?=\s+[a-z]))\b)[^/\s"',;<>]+)+?(?=$|["'<>)](?!\/)|[,;.]|\s+(?:before|after|then|and(?=\s+(?:[a-z]|[~/"']|$))|or(?=\s+(?:[a-z]|[~/"']|$)))\b)/g,
     replacement: "[REDACTED_PATH]",
   },
   {
@@ -49,7 +49,7 @@ export const DEFAULT_REDACTION_RULES: readonly CompiledRedactionRule[] = [
   {
     name: "absolute-posix-spaced-extensionless-path",
     pattern:
-      /\/(?:[^/\s"',;<>]+(?: [^/\s"',;<>]+)*\/)*[^/\s"',;<>]+(?: (?!(?:before|after|then|and|or)\b)[^/\s"',;<>]+)+?(?=$|["'<>)](?!\/)|[,;.]|\s+(?:before|after|then|and|or)\b)/gi,
+      /\/(?:[^/\s"',;<>]+(?: [^/\s"',;<>]+)*\/)*[^/\s"',;<>]+(?: (?!(?:before|after|then|and(?=\s+[a-z])|or(?=\s+[a-z]))\b)[^/\s"',;<>]+)+?(?=$|["'<>)](?!\/)|[,;.]|\s+(?:before|after|then|and(?=\s+(?:[a-z]|[~/"']|$))|or(?=\s+(?:[a-z]|[~/"']|$)))\b)/g,
     replacement: "[REDACTED_PATH]",
   },
   {

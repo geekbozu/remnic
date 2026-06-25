@@ -114,6 +114,7 @@ function codexRoleFromTypes(
 function sessionKeyFromRow(row: unknown): string | undefined {
   if (!row || typeof row !== "object") return undefined;
   const obj = row as Record<string, unknown>;
+  const nestedMessage = objectField(obj.message);
   const payload = objectField(obj.payload);
   const payloadMessage = objectField(payload?.message);
   const rowType = firstString(obj.type, obj.kind, obj.event)?.toLowerCase();
@@ -128,6 +129,14 @@ function sessionKeyFromRow(row: unknown): string | undefined {
     obj.thread_id,
     obj.transcriptId,
     obj.transcript_id,
+    nestedMessage?.sessionKey,
+    nestedMessage?.session_key,
+    nestedMessage?.sessionId,
+    nestedMessage?.session_id,
+    nestedMessage?.conversationId,
+    nestedMessage?.conversation_id,
+    nestedMessage?.threadId,
+    nestedMessage?.thread_id,
     rowType === "session_meta" ? payload?.id : undefined,
     payload?.sessionKey,
     payload?.session_key,
@@ -337,7 +346,7 @@ function pushTurnWithCodexMirrorDedupe(
   row: unknown,
   turn: LocalSessionTurn,
   turns: LocalSessionTurn[],
-  codexMirrorTurns: Map<string, { index: number; surface: CodexMirrorSurface }>
+  codexMirrorTurns: Map<string, { index: number; surface: CodexMirrorSurface; rowSignal?: string }>
 ): void {
   const key = codexMirrorKey(adapterId, row, turn);
   const surface = key ? codexMirrorSurface(row) : undefined;
@@ -347,15 +356,21 @@ function pushTurnWithCodexMirrorDedupe(
   }
 
   const existing = codexMirrorTurns.get(key);
+  const rowSignal = turn.sourceId ?? turn.timestamp;
   if (existing) {
+    if (existing.surface === surface && (!existing.rowSignal || !rowSignal || existing.rowSignal !== rowSignal)) {
+      codexMirrorTurns.set(key, { index: turns.length, surface, ...(rowSignal ? { rowSignal } : {}) });
+      turns.push(turn);
+      return;
+    }
     if (CODEX_MIRROR_SURFACE_PRIORITY[surface] > CODEX_MIRROR_SURFACE_PRIORITY[existing.surface]) {
       turns[existing.index] = turn;
-      codexMirrorTurns.set(key, { index: existing.index, surface });
+      codexMirrorTurns.set(key, { index: existing.index, surface, ...(rowSignal ? { rowSignal } : {}) });
     }
     return;
   }
 
-  codexMirrorTurns.set(key, { index: turns.length, surface });
+  codexMirrorTurns.set(key, { index: turns.length, surface, ...(rowSignal ? { rowSignal } : {}) });
   turns.push(turn);
 }
 
@@ -367,7 +382,7 @@ function makeJsonTranscriptAdapter(id: string): LocalSessionSourceAdapter {
       const fallbackSessionKey = `${id}:${input.fileRef}`;
       let currentSessionKey = fallbackSessionKey;
       const turns: LocalSessionTurn[] = [];
-      const codexMirrorTurns = new Map<string, { index: number; surface: CodexMirrorSurface }>();
+      const codexMirrorTurns = new Map<string, { index: number; surface: CodexMirrorSurface; rowSignal?: string }>();
       for (const row of parsed.rows) {
         if (shouldSkipRowForAdapter(id, row)) continue;
         currentSessionKey = sessionKeyFromRow(row) ?? currentSessionKey;
