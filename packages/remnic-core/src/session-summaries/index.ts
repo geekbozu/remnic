@@ -31,9 +31,15 @@ function shortHash(value: string, length = 16): string {
 
 async function listTranscriptFiles(root: string, maxFiles: number): Promise<{ files: string[]; truncated: boolean }> {
   const out: string[] = [];
+  let truncated = false;
+  const entrySortKey = (entryName: string, isDirectory: boolean): string => (isDirectory ? `${entryName}${path.sep}` : entryName);
   async function visit(dir: string): Promise<void> {
-    const entries = (await readdir(dir, { withFileTypes: true })).sort((a, b) => a.name.localeCompare(b.name));
+    if (truncated) return;
+    const entries = (await readdir(dir, { withFileTypes: true })).sort((a, b) =>
+      entrySortKey(a.name, a.isDirectory()).localeCompare(entrySortKey(b.name, b.isDirectory()))
+    );
     for (const entry of entries) {
+      if (truncated) return;
       if (entry.name.startsWith(".")) continue;
       if (entry.isSymbolicLink()) continue;
       const fullPath = path.join(dir, entry.name);
@@ -45,13 +51,17 @@ async function listTranscriptFiles(root: string, maxFiles: number): Promise<{ fi
       const ext = path.extname(entry.name).toLowerCase();
       if (!SUPPORTED_EXTENSIONS.has(ext)) continue;
       out.push(fullPath);
+      if (out.length > maxFiles) {
+        truncated = true;
+        return;
+      }
     }
   }
   await visit(root);
   const sorted = out.sort();
   return {
     files: sorted.slice(0, maxFiles),
-    truncated: sorted.length > maxFiles,
+    truncated,
   };
 }
 

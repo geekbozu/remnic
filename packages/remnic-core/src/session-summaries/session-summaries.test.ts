@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -1011,6 +1011,41 @@ test("maxFiles reports truncation instead of dropping files silently", async () 
       report.warnings.some((warning) => warning.code === "session-summaries.max_files_truncated"),
       true
     );
+  });
+});
+
+test("maxFiles stops walking after enough transcript candidates are found", async () => {
+  await withTempDir(async (dir) => {
+    for (const name of ["a", "b"]) {
+      await writeFile(
+        path.join(dir, `${name}.jsonl`),
+        JSON.stringify({
+          sessionKey: name,
+          role: "user",
+          timestamp: "2026-02-03T00:00:00.000Z",
+          content: name,
+        }),
+        "utf-8"
+      );
+    }
+
+    const neverReadDir = path.join(dir, "z-never-read");
+    await mkdir(neverReadDir);
+    await chmod(neverReadDir, 0o000);
+    try {
+      const report = await collectLocalSessionSummaries({
+        inputDir: dir,
+        maxFiles: 1,
+      });
+
+      assert.equal(report.filesScanned, 1);
+      assert.equal(
+        report.warnings.some((warning) => warning.code === "session-summaries.max_files_truncated"),
+        true
+      );
+    } finally {
+      await chmod(neverReadDir, 0o700);
+    }
   });
 });
 
