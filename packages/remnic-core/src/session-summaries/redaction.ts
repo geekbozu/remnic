@@ -43,13 +43,13 @@ export const DEFAULT_REDACTION_RULES: readonly CompiledRedactionRule[] = [
   {
     name: "absolute-posix-spaced-path",
     pattern:
-      /\/(?:[^/\s"',;<>]+(?: [^/\s"',;<>]+)*\/)+[^/\s"',;<>]+(?: (?!(?:before|after|then|and|or)\b)[^/\s"',;<>]+)+\.[^/\s"',;<>]+?(?=$|[\s"',;<>)]|[.,](?:\s|$))/g,
+      /\/(?:[^/\s"',;<>]+(?: [^/\s"',;<>]+)*\/)*[^/\s"',;<>]+(?: (?!(?:before|after|then|and|or)\b)[^/\s"',;<>]+)+\.[^/\s"',;<>]+?(?=$|[\s"',;<>)]|[.,](?:\s|$))/g,
     replacement: "[REDACTED_PATH]",
   },
   {
     name: "absolute-posix-spaced-extensionless-path",
     pattern:
-      /\/(?:[^/\s"',;<>]+(?: [^/\s"',;<>]+)*\/)+[^/\s"',;<>]+(?: (?!(?:before|after|then|and|or)\b)[^/\s"',;<>]+)+?(?=$|[,;.]|\s+(?:before|after|then|and|or)\b)/gi,
+      /\/(?:[^/\s"',;<>]+(?: [^/\s"',;<>]+)*\/)*[^/\s"',;<>]+(?: (?!(?:before|after|then|and|or)\b)[^/\s"',;<>]+)+?(?=$|[,;.]|\s+(?:before|after|then|and|or)\b)/gi,
     replacement: "[REDACTED_PATH]",
   },
   {

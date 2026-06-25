@@ -979,6 +979,31 @@ test("redaction covers extensionless POSIX paths with spaced names", async () =>
   });
 });
 
+test("redaction covers single-segment POSIX paths with spaced names", async () => {
+  await withTempDir(async (dir) => {
+    await writeFile(
+      path.join(dir, "session.jsonl"),
+      JSON.stringify({
+        sessionKey: "s",
+        role: "user",
+        timestamp: "2026-04-05T00:00:00.000Z",
+        content: "Inspect /Secret Project before replying and /Secret Project.txt after.",
+      }),
+      "utf-8"
+    );
+
+    const report = await collectLocalSessionSummaries({
+      inputDir: dir,
+      includeRedactedExcerpts: true,
+    });
+
+    assert.equal(
+      report.drafts[0].excerpts?.[0].text,
+      "Inspect [REDACTED_PATH] before replying and [REDACTED_PATH] after."
+    );
+  });
+});
+
 test("redaction covers UNC Windows paths", async () => {
   await withTempDir(async (dir) => {
     await writeFile(
