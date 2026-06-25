@@ -137,6 +137,8 @@ function sessionKeyFromRow(row: unknown): string | undefined {
     nestedMessage?.conversation_id,
     nestedMessage?.threadId,
     nestedMessage?.thread_id,
+    nestedMessage?.transcriptId,
+    nestedMessage?.transcript_id,
     rowType === "session_meta" ? payload?.id : undefined,
     payload?.sessionKey,
     payload?.session_key,
@@ -146,6 +148,8 @@ function sessionKeyFromRow(row: unknown): string | undefined {
     payload?.conversation_id,
     payload?.threadId,
     payload?.thread_id,
+    payload?.transcriptId,
+    payload?.transcript_id,
     payloadMessage?.sessionKey,
     payloadMessage?.session_key,
     payloadMessage?.sessionId,
@@ -153,7 +157,9 @@ function sessionKeyFromRow(row: unknown): string | undefined {
     payloadMessage?.conversationId,
     payloadMessage?.conversation_id,
     payloadMessage?.threadId,
-    payloadMessage?.thread_id
+    payloadMessage?.thread_id,
+    payloadMessage?.transcriptId,
+    payloadMessage?.transcript_id
   );
 }
 
@@ -344,7 +350,7 @@ function pushTurnWithCodexMirrorDedupe(
   row: unknown,
   turn: LocalSessionTurn,
   turns: LocalSessionTurn[],
-  codexMirrorTurns: Map<string, { index: number; surface: CodexMirrorSurface; rowSignal?: string }>
+  codexMirrorTurns: Map<string, { index: number; surface: CodexMirrorSurface; rowSignal?: string }[]>
 ): void {
   const key = codexMirrorKey(adapterId, row, turn);
   const surface = key ? codexMirrorSurface(row) : undefined;
@@ -353,22 +359,26 @@ function pushTurnWithCodexMirrorDedupe(
     return;
   }
 
-  const existing = codexMirrorTurns.get(key);
+  const candidates = codexMirrorTurns.get(key) ?? [];
   const rowSignal = turn.sourceId ?? turn.timestamp;
-  if (existing) {
-    if (existing.surface === surface && (!existing.rowSignal || !rowSignal || existing.rowSignal !== rowSignal)) {
-      codexMirrorTurns.set(key, { index: turns.length, surface, ...(rowSignal ? { rowSignal } : {}) });
-      turns.push(turn);
-      return;
+  const matchingIndex = candidates.findIndex((candidate) => {
+    if (candidate.surface === surface) {
+      return Boolean(candidate.rowSignal && rowSignal && candidate.rowSignal === rowSignal);
     }
+    return Boolean(candidate.rowSignal && rowSignal && candidate.rowSignal === rowSignal);
+  });
+  const existing = matchingIndex >= 0 ? candidates[matchingIndex] : undefined;
+  if (existing) {
     if (CODEX_MIRROR_SURFACE_PRIORITY[surface] > CODEX_MIRROR_SURFACE_PRIORITY[existing.surface]) {
       turns[existing.index] = turn;
-      codexMirrorTurns.set(key, { index: existing.index, surface, ...(rowSignal ? { rowSignal } : {}) });
+      candidates[matchingIndex] = { index: existing.index, surface, ...(rowSignal ? { rowSignal } : {}) };
+      codexMirrorTurns.set(key, candidates);
     }
     return;
   }
 
-  codexMirrorTurns.set(key, { index: turns.length, surface, ...(rowSignal ? { rowSignal } : {}) });
+  candidates.push({ index: turns.length, surface, ...(rowSignal ? { rowSignal } : {}) });
+  codexMirrorTurns.set(key, candidates);
   turns.push(turn);
 }
 
@@ -380,7 +390,7 @@ function makeJsonTranscriptAdapter(id: string): LocalSessionSourceAdapter {
       const fallbackSessionKey = `${id}:${input.fileRef}`;
       let currentSessionKey = fallbackSessionKey;
       const turns: LocalSessionTurn[] = [];
-      const codexMirrorTurns = new Map<string, { index: number; surface: CodexMirrorSurface; rowSignal?: string }>();
+      const codexMirrorTurns = new Map<string, { index: number; surface: CodexMirrorSurface; rowSignal?: string }[]>();
       for (const row of parsed.rows) {
         if (shouldSkipRowForAdapter(id, row)) continue;
         currentSessionKey = sessionKeyFromRow(row) ?? currentSessionKey;

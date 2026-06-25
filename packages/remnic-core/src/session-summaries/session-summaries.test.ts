@@ -305,12 +305,14 @@ test("codex-jsonl deduplicates mirrored agent event and response item rows", asy
         }),
         JSON.stringify({
           type: "event_msg",
+          id: "assistant-turn-1",
           sessionKey: "codex-session",
           timestamp: "2026-02-03T00:00:01.000Z",
           payload: { type: "agent_message", message: "Mirrored assistant response." },
         }),
         JSON.stringify({
           type: "response_item",
+          id: "assistant-turn-1",
           sessionKey: "codex-session",
           timestamp: "2026-02-03T00:00:02.000Z",
           payload: { content: [{ type: "output_text", text: "Mirrored assistant response." }] },
@@ -332,6 +334,51 @@ test("codex-jsonl deduplicates mirrored agent event and response item rows", asy
     assert.deepEqual(
       report.drafts[0].excerpts?.map((excerpt) => excerpt.text),
       ["User request.", "Mirrored assistant response."]
+    );
+  });
+});
+
+test("codex-jsonl keeps same-text cross-surface rows with different signals", async () => {
+  await withTempDir(async (dir) => {
+    await writeFile(
+      path.join(dir, "rollout.jsonl"),
+      [
+        JSON.stringify({
+          type: "event_msg",
+          sessionKey: "codex-session",
+          timestamp: "2026-02-03T00:00:00.000Z",
+          payload: { message: "User request." },
+        }),
+        JSON.stringify({
+          type: "event_msg",
+          id: "assistant-event-1",
+          sessionKey: "codex-session",
+          timestamp: "2026-02-03T00:00:01.000Z",
+          payload: { type: "agent_message", message: "OK" },
+        }),
+        JSON.stringify({
+          type: "response_item",
+          id: "assistant-response-1",
+          sessionKey: "codex-session",
+          timestamp: "2026-02-03T00:00:02.000Z",
+          payload: { content: [{ type: "output_text", text: "OK" }] },
+        }),
+      ].join("\n"),
+      "utf-8"
+    );
+
+    const report = await collectLocalSessionSummaries({
+      inputDir: dir,
+      source: "codex-jsonl",
+      includeRedactedExcerpts: true,
+    });
+
+    assert.equal(report.turnsParsed, 3);
+    assert.equal(report.drafts[0].turnCount, 3);
+    assert.equal(report.drafts[0].roles.assistant, 2);
+    assert.deepEqual(
+      report.drafts[0].excerpts?.map((excerpt) => excerpt.text),
+      ["User request.", "OK", "OK"]
     );
   });
 });
@@ -533,6 +580,43 @@ test("top-level message metadata contributes stable session ids", async () => {
           role: "assistant",
           timestamp: "2026-02-03T00:00:00.000Z",
           content: "Changed nested content.",
+        },
+      }),
+      "utf-8"
+    );
+    const secondReport = await collectLocalSessionSummaries({ inputDir: dir });
+
+    assert.equal(firstReport.drafts[0].sourceSessionRef, secondReport.drafts[0].sourceSessionRef);
+    assert.equal(firstReport.drafts[0].draftId, secondReport.drafts[0].draftId);
+    assert.equal(firstReport.drafts[0].roles.assistant, 1);
+  });
+});
+
+test("nested transcript id metadata contributes stable session ids", async () => {
+  await withTempDir(async (dir) => {
+    const transcriptPath = path.join(dir, "nested-transcript.jsonl");
+    await writeFile(
+      transcriptPath,
+      JSON.stringify({
+        message: {
+          transcriptId: "top-level-message-transcript",
+          role: "assistant",
+          timestamp: "2026-02-03T00:00:00.000Z",
+          content: "Original nested transcript content.",
+        },
+      }),
+      "utf-8"
+    );
+    const firstReport = await collectLocalSessionSummaries({ inputDir: dir });
+
+    await writeFile(
+      transcriptPath,
+      JSON.stringify({
+        message: {
+          transcriptId: "top-level-message-transcript",
+          role: "assistant",
+          timestamp: "2026-02-03T00:00:00.000Z",
+          content: "Changed nested transcript content.",
         },
       }),
       "utf-8"
