@@ -917,6 +917,32 @@ test("redaction covers prefixed environment secret keys", async () => {
   });
 });
 
+test("redaction covers common access and private key assignments", async () => {
+  await withTempDir(async (dir) => {
+    await writeFile(
+      path.join(dir, "session.jsonl"),
+      JSON.stringify({
+        sessionKey: "s",
+        role: "user",
+        timestamp: "2026-04-05T00:00:00.000Z",
+        content:
+          'Use AWS_SECRET_ACCESS_KEY=aws-secret, ACCESS_KEY=plain-access, and PRIVATE_KEY="private material" for tests.',
+      }),
+      "utf-8"
+    );
+
+    const report = await collectLocalSessionSummaries({
+      inputDir: dir,
+      includeRedactedExcerpts: true,
+    });
+
+    assert.equal(
+      report.drafts[0].excerpts?.[0].text,
+      "Use [REDACTED_SECRET], [REDACTED_SECRET], and [REDACTED_SECRET] for tests."
+    );
+  });
+});
+
 test("custom redaction rules must be an array", async () => {
   assert.throws(
     () => compileRedactionRules({ rules: { name: "bad", pattern: "bad" } } as never),

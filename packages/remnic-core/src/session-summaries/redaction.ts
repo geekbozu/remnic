@@ -4,7 +4,7 @@ export const DEFAULT_REDACTION_RULES: readonly CompiledRedactionRule[] = [
   {
     name: "secret-token",
     pattern:
-      /(?<![A-Za-z0-9_])(?:sk-[A-Za-z0-9_-]{12,}|sk-proj-[A-Za-z0-9_-]{12,}|(?:[A-Za-z0-9]+[_-]+)*(?:api[_-]?key|token|secret|password)\s*[:=]\s*(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s"',;]+))/gi,
+      /(?<![A-Za-z0-9_])(?:sk-[A-Za-z0-9_-]{12,}|sk-proj-[A-Za-z0-9_-]{12,}|(?:[A-Za-z0-9]+[_-]+)*(?:api[_-]?key|access[_-]?key|private[_-]?key|token|secret|password)\s*[:=]\s*(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s"',;]+))/gi,
     replacement: "[REDACTED_SECRET]",
   },
   {
