@@ -221,6 +221,50 @@ test("codex-jsonl parses Codex rollout payload rows", async () => {
   });
 });
 
+test("codex-jsonl skips compacted rollout summary rows", async () => {
+  await withTempDir(async (dir) => {
+    await writeFile(
+      path.join(dir, "rollout.jsonl"),
+      [
+        JSON.stringify({
+          type: "event_msg",
+          sessionKey: "codex-session",
+          timestamp: "2026-02-03T00:00:00.000Z",
+          payload: { message: "Original user request." },
+        }),
+        JSON.stringify({
+          type: "compacted",
+          sessionKey: "codex-session",
+          timestamp: "2026-02-03T00:00:01.000Z",
+          payload: { message: "Synthetic compaction summary should never become an excerpt." },
+        }),
+        JSON.stringify({
+          type: "response_item",
+          sessionKey: "codex-session",
+          timestamp: "2026-02-03T00:00:02.000Z",
+          payload: { content: [{ type: "output_text", text: "Assistant response." }] },
+        }),
+      ].join("\n"),
+      "utf-8"
+    );
+
+    const report = await collectLocalSessionSummaries({
+      inputDir: dir,
+      source: "codex-jsonl",
+      includeRedactedExcerpts: true,
+    });
+
+    assert.equal(report.turnsParsed, 2);
+    assert.equal(report.drafts[0].turnCount, 2);
+    assert.equal(report.drafts[0].roles.other, 0);
+    assert.deepEqual(
+      report.drafts[0].excerpts?.map((excerpt) => excerpt.text),
+      ["Original user request.", "Assistant response."]
+    );
+    assert.equal(JSON.stringify(report.drafts[0]).includes("Synthetic compaction summary"), false);
+  });
+});
+
 test("codex-jsonl inherits legacy session_meta payload ids", async () => {
   await withTempDir(async (dir) => {
     const transcriptPath = path.join(dir, "rollout.jsonl");

@@ -291,6 +291,15 @@ function turnFromRow(row: unknown, fallbackSessionKey: string): LocalSessionTurn
   };
 }
 
+function shouldSkipRowForAdapter(adapterId: string, row: unknown): boolean {
+  if (adapterId !== "codex-jsonl" || !row || typeof row !== "object") return false;
+  const obj = row as Record<string, unknown>;
+  const payload = objectField(obj.payload);
+  const rowType = firstString(obj.type, obj.kind, obj.event)?.toLowerCase();
+  const payloadType = firstString(payload?.type)?.toLowerCase();
+  return rowType === "compacted" || payloadType === "compacted";
+}
+
 function makeJsonTranscriptAdapter(id: string): LocalSessionSourceAdapter {
   return {
     id,
@@ -300,6 +309,7 @@ function makeJsonTranscriptAdapter(id: string): LocalSessionSourceAdapter {
       let currentSessionKey = fallbackSessionKey;
       const turns: LocalSessionTurn[] = [];
       for (const row of parsed.rows) {
+        if (shouldSkipRowForAdapter(id, row)) continue;
         currentSessionKey = sessionKeyFromRow(row) ?? currentSessionKey;
         const turn = turnFromRow(row, currentSessionKey);
         if (turn) {
