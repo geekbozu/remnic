@@ -86,6 +86,15 @@ function safeTimestampSortValue(turn: LocalSessionTurn): number {
   return Number.isFinite(millis) ? millis : Number.MAX_SAFE_INTEGER;
 }
 
+function earliestTurnSortValue(turns: readonly LocalSessionTurn[]): number {
+  let earliest = Number.MAX_SAFE_INTEGER;
+  for (const turn of turns) {
+    const value = safeTimestampSortValue(turn);
+    if (value < earliest) earliest = value;
+  }
+  return earliest;
+}
+
 function truncateExcerpt(text: string): string {
   const compact = text.replace(/\s+/g, " ").trim();
   return compact.length > 240 ? `${compact.slice(0, 237)}...` : compact;
@@ -267,8 +276,8 @@ export async function collectLocalSessionSummaries(
 
   const drafts: SessionSummaryDraft[] = [];
   const sessionEntries = [...sessions.entries()].sort(([aKey, a], [bKey, b]) => {
-    const aFirst = Math.min(...a.map(safeTimestampSortValue));
-    const bFirst = Math.min(...b.map(safeTimestampSortValue));
+    const aFirst = earliestTurnSortValue(a);
+    const bFirst = earliestTurnSortValue(b);
     return aFirst - bFirst || a[0]?.fileHash.localeCompare(b[0]?.fileHash ?? "") || aKey.localeCompare(bKey);
   });
   if (sessionEntries.length > maxSessions) {

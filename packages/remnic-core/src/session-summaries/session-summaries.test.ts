@@ -888,6 +888,45 @@ test("maxSessions reports truncation instead of dropping sessions silently", asy
   });
 });
 
+test("session ordering handles large sessions without spreading timestamp arrays", async () => {
+  await withTempDir(async (dir) => {
+    await writeFile(
+      path.join(dir, "a-small.jsonl"),
+      JSON.stringify({
+        sessionKey: "small-session",
+        role: "user",
+        timestamp: "2026-02-03T00:00:00.000Z",
+        content: "Small session wins the first slot.",
+      }),
+      "utf-8"
+    );
+
+    const largeTurnCount = 130_000;
+    const largeRows = Array.from({ length: largeTurnCount }, () =>
+      JSON.stringify({
+        sessionKey: "large-session",
+        role: "assistant",
+        timestamp: "2026-02-04T00:00:00.000Z",
+        content: "Large later session.",
+      })
+    ).join("\n");
+    await writeFile(path.join(dir, "b-large.jsonl"), largeRows, "utf-8");
+
+    const report = await collectLocalSessionSummaries({
+      inputDir: dir,
+      maxSessions: 1,
+    });
+
+    assert.equal(report.turnsParsed, largeTurnCount + 1);
+    assert.equal(report.sessionsSummarized, 1);
+    assert.equal(report.drafts[0].turnCount, 1);
+    assert.equal(
+      report.warnings.some((warning) => warning.code === "session-summaries.max_sessions_truncated"),
+      true
+    );
+  });
+});
+
 test("duplicate transcript files are skipped by content hash", async () => {
   await withTempDir(async (dir) => {
     const content = JSON.stringify({
