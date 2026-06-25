@@ -31,6 +31,7 @@
 - [Benchmark Readiness](benchmarks/sota-readiness.md) — #841-#850 cue-recall audit for published memory benchmarks
 - [Retention Policy](retention-policy.md) — Hot/cold tier substrate, value-score model, `remnic forget`, `remnic tier list/explain` (issue #686)
 - [Import / Export](import-export.md) — Portable backups and migration
+- [Local AI Session Summary Drafts](local-session-summaries.md) — Privacy-first local transcript harvesting into sanitized summary drafts
 - [ops/pr-review-hardening-playbook.md](ops/pr-review-hardening-playbook.md) — Pre-push review checklist
 - [ops/plugin-engineering-patterns.md](ops/plugin-engineering-patterns.md) — Engineering patterns for retrieval/intent/cache
 

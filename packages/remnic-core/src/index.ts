@@ -754,9 +754,7 @@ export {
   type ExtensionSchema,
 } from "./memory-extension-host/index.js";
 
-export {
-  buildExtensionsBlockForConsolidation,
-} from "./semantic-consolidation.js";
+export { buildExtensionsBlockForConsolidation } from "./semantic-consolidation.js";
 
 // ---------------------------------------------------------------------------
 // Connector Manager
@@ -1085,6 +1083,12 @@ export {
 } from "./fallback-llm.js";
 
 // ---------------------------------------------------------------------------
+// Local AI session summary drafts
+// ---------------------------------------------------------------------------
+
+export * from "./session-summaries/index.js";
+
+// ---------------------------------------------------------------------------
 // Training-data export (issue #459)
 // ---------------------------------------------------------------------------
 
@@ -1177,7 +1181,6 @@ export type {
   BudgetDecisionReason,
   CrossNamespaceBudgetConfig,
 } from "./cross-namespace-budget.js";
-
 
 // ---------------------------------------------------------------------------
 // Recall-audit anomaly detector (issue #565 PR 5/5)
