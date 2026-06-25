@@ -174,7 +174,7 @@ function parseJsonlRows(
     } catch {
       const warning = {
         code: `${adapterId}.jsonl.invalid_line`,
-        message: `Skipping invalid JSONL line ${index + 1}.`,
+        message: `Skipping invalid JSONL line ${index + 1} in fileRef ${fileRef}.`,
         fileRef,
         line: index + 1,
       };
@@ -198,7 +198,9 @@ function parseRows(
   try {
     return { rows: extractRowsFromJson(JSON.parse(content)), warnings: [] };
   } catch (error) {
-    const message = `Invalid ${adapterId} JSON: ${error instanceof Error ? error.message : String(error)}`;
+    const message = `Invalid ${adapterId} JSON in fileRef ${fileRef}: ${
+      error instanceof Error ? error.message : String(error)
+    }`;
     if (strict) throw new Error(message);
     return {
       rows: [],

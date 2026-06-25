@@ -1086,6 +1086,19 @@ test("redaction config file must be a JSON object", async () => {
 test("strict mode rejects malformed JSONL", async () => {
   await withTempDir(async (dir) => {
     await writeFile(path.join(dir, "bad.jsonl"), "{not json}\n", "utf-8");
-    await assert.rejects(() => collectLocalSessionSummaries({ inputDir: dir, strict: true }), /invalid JSONL line/i);
+    await assert.rejects(
+      () => collectLocalSessionSummaries({ inputDir: dir, strict: true }),
+      /invalid JSONL line 1 in fileRef [a-f0-9]+/i
+    );
+  });
+});
+
+test("strict mode rejects malformed JSON with fileRef context", async () => {
+  await withTempDir(async (dir) => {
+    await writeFile(path.join(dir, "bad.json"), "{not json}\n", "utf-8");
+    await assert.rejects(
+      () => collectLocalSessionSummaries({ inputDir: dir, strict: true }),
+      /invalid generic-jsonl JSON in fileRef [a-f0-9]+/i
+    );
   });
 });
