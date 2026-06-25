@@ -265,6 +265,50 @@ test("codex-jsonl skips compacted rollout summary rows", async () => {
   });
 });
 
+test("codex-jsonl deduplicates mirrored agent event and response item rows", async () => {
+  await withTempDir(async (dir) => {
+    await writeFile(
+      path.join(dir, "rollout.jsonl"),
+      [
+        JSON.stringify({
+          type: "event_msg",
+          sessionKey: "codex-session",
+          timestamp: "2026-02-03T00:00:00.000Z",
+          payload: { message: "User request." },
+        }),
+        JSON.stringify({
+          type: "event_msg",
+          sessionKey: "codex-session",
+          timestamp: "2026-02-03T00:00:01.000Z",
+          payload: { type: "agent_message", message: "Mirrored assistant response." },
+        }),
+        JSON.stringify({
+          type: "response_item",
+          sessionKey: "codex-session",
+          timestamp: "2026-02-03T00:00:02.000Z",
+          payload: { content: [{ type: "output_text", text: "Mirrored assistant response." }] },
+        }),
+      ].join("\n"),
+      "utf-8"
+    );
+
+    const report = await collectLocalSessionSummaries({
+      inputDir: dir,
+      source: "codex-jsonl",
+      includeRedactedExcerpts: true,
+    });
+
+    assert.equal(report.turnsParsed, 2);
+    assert.equal(report.drafts[0].turnCount, 2);
+    assert.equal(report.drafts[0].roles.user, 1);
+    assert.equal(report.drafts[0].roles.assistant, 1);
+    assert.deepEqual(
+      report.drafts[0].excerpts?.map((excerpt) => excerpt.text),
+      ["User request.", "Mirrored assistant response."]
+    );
+  });
+});
+
 test("codex-jsonl inherits legacy session_meta payload ids", async () => {
   await withTempDir(async (dir) => {
     const transcriptPath = path.join(dir, "rollout.jsonl");

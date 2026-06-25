@@ -303,6 +303,62 @@ function shouldSkipRowForAdapter(adapterId: string, row: unknown): boolean {
   return rowType === "compacted" || payloadType === "compacted";
 }
 
+type CodexMirrorSurface = "event-agent-message" | "response-item";
+
+const CODEX_MIRROR_SURFACE_PRIORITY: Record<CodexMirrorSurface, number> = {
+  "event-agent-message": 1,
+  "response-item": 2,
+};
+
+function codexMirrorSurface(row: unknown): CodexMirrorSurface | undefined {
+  if (!row || typeof row !== "object") return undefined;
+  const obj = row as Record<string, unknown>;
+  const payload = objectField(obj.payload);
+  const payloadItem = objectField(payload?.item);
+  const rowType = firstString(obj.type, obj.kind, obj.event)?.toLowerCase();
+  const payloadType = firstString(payload?.type, payloadItem?.type)?.toLowerCase();
+  if (rowType === "event_msg" && payloadType === "agent_message") return "event-agent-message";
+  if (rowType === "response_item") return "response-item";
+  return undefined;
+}
+
+function codexMirrorKey(adapterId: string, row: unknown, turn: LocalSessionTurn): string | undefined {
+  if (adapterId !== "codex-jsonl" || turn.role !== "assistant") return undefined;
+  const surface = codexMirrorSurface(row);
+  if (!surface) return undefined;
+  const sessionKey = turn.sessionKey?.trim();
+  const content = turn.content.replace(/\s+/g, " ").trim();
+  if (!sessionKey || content.length === 0) return undefined;
+  return `${sessionKey}\0${turn.role}\0${content}`;
+}
+
+function pushTurnWithCodexMirrorDedupe(
+  adapterId: string,
+  row: unknown,
+  turn: LocalSessionTurn,
+  turns: LocalSessionTurn[],
+  codexMirrorTurns: Map<string, { index: number; surface: CodexMirrorSurface }>
+): void {
+  const key = codexMirrorKey(adapterId, row, turn);
+  const surface = key ? codexMirrorSurface(row) : undefined;
+  if (!key || !surface) {
+    turns.push(turn);
+    return;
+  }
+
+  const existing = codexMirrorTurns.get(key);
+  if (existing && existing.surface !== surface) {
+    if (CODEX_MIRROR_SURFACE_PRIORITY[surface] > CODEX_MIRROR_SURFACE_PRIORITY[existing.surface]) {
+      turns[existing.index] = turn;
+      codexMirrorTurns.set(key, { index: existing.index, surface });
+    }
+    return;
+  }
+
+  codexMirrorTurns.set(key, { index: turns.length, surface });
+  turns.push(turn);
+}
+
 function makeJsonTranscriptAdapter(id: string): LocalSessionSourceAdapter {
   return {
     id,
@@ -311,13 +367,14 @@ function makeJsonTranscriptAdapter(id: string): LocalSessionSourceAdapter {
       const fallbackSessionKey = `${id}:${input.fileRef}`;
       let currentSessionKey = fallbackSessionKey;
       const turns: LocalSessionTurn[] = [];
+      const codexMirrorTurns = new Map<string, { index: number; surface: CodexMirrorSurface }>();
       for (const row of parsed.rows) {
         if (shouldSkipRowForAdapter(id, row)) continue;
         currentSessionKey = sessionKeyFromRow(row) ?? currentSessionKey;
         const turn = turnFromRow(row, currentSessionKey);
         if (turn) {
           currentSessionKey = turn.sessionKey ?? currentSessionKey;
-          turns.push(turn);
+          pushTurnWithCodexMirrorDedupe(id, row, turn, turns, codexMirrorTurns);
         }
       }
       return { turns, warnings: parsed.warnings };
