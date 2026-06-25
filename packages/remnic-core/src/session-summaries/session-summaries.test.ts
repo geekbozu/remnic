@@ -120,6 +120,33 @@ test("includeRedactedExcerpts forces default redaction when defaults are disable
   });
 });
 
+test("summary includes all normalized role counts", async () => {
+  await withTempDir(async (dir) => {
+    await writeFile(
+      path.join(dir, "session.jsonl"),
+      [
+        JSON.stringify({
+          sessionKey: "roles-session",
+          role: "system",
+          timestamp: "2026-02-03T00:00:00.000Z",
+          content: "System instruction.",
+        }),
+        JSON.stringify({
+          sessionKey: "roles-session",
+          role: "other",
+          timestamp: "2026-02-03T00:00:01.000Z",
+          content: "Other event.",
+        }),
+      ].join("\n"),
+      "utf-8"
+    );
+
+    const report = await collectLocalSessionSummaries({ inputDir: dir });
+
+    assert.match(report.drafts[0].summary, /\(0 user, 0 assistant, 0 tool, 1 system, 1 other\)/);
+  });
+});
+
 test("parsing falls back to later non-empty content fields", async () => {
   await withTempDir(async (dir) => {
     await writeFile(
@@ -1525,6 +1552,18 @@ test("strict mode rejects malformed JSONL", async () => {
       () => collectLocalSessionSummaries({ inputDir: dir, strict: true }),
       /invalid JSONL line 1 in fileRef [a-f0-9]+/i
     );
+  });
+});
+
+test("malformed JSON warnings do not include transcript snippets", async () => {
+  await withTempDir(async (dir) => {
+    await writeFile(path.join(dir, "bad.json"), '{"content":"PRIVATE_VALUE_SHOULD_NOT_APPEAR",', "utf-8");
+
+    const report = await collectLocalSessionSummaries({ inputDir: dir });
+
+    assert.equal(report.warnings.length, 1);
+    assert.match(report.warnings[0].message, /invalid generic-jsonl JSON in fileRef [a-f0-9]+; skipping file/i);
+    assert.equal(report.warnings[0].message.includes("PRIVATE_VALUE_SHOULD_NOT_APPEAR"), false);
   });
 });
 

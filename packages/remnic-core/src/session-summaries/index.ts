@@ -143,7 +143,7 @@ function buildDraft(options: {
   const dateText = firstTimestamp && lastTimestamp ? ` from ${firstTimestamp} to ${lastTimestamp}` : "";
   const summary =
     `Local AI session summary: ${sortedTurns.length} turn(s)` +
-    ` (${roles.user} user, ${roles.assistant} assistant, ${roles.tool} tool)` +
+    ` (${roles.user} user, ${roles.assistant} assistant, ${roles.tool} tool, ${roles.system} system, ${roles.other} other)` +
     `${dateText}. Raw transcript text, source session keys, and local file paths are not stored.`;
 
   return {

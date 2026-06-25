@@ -209,10 +209,8 @@ function parseRows(
   }
   try {
     return { rows: extractRowsFromJson(JSON.parse(content)), warnings: [] };
-  } catch (error) {
-    const message = `Invalid ${adapterId} JSON in fileRef ${fileRef}: ${
-      error instanceof Error ? error.message : String(error)
-    }`;
+  } catch {
+    const message = `Invalid ${adapterId} JSON in fileRef ${fileRef}; skipping file.`;
     if (strict) throw new Error(message);
     return {
       rows: [],
