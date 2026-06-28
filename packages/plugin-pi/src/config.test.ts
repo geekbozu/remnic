@@ -293,6 +293,32 @@ test("loadConfig fails closed on invalid numeric values", () => {
   }
 });
 
+test("loadConfig fails closed on invalid sessionKeyPrefix values", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "remnic-pi-config-bad-prefix-"));
+  const configPath = path.join(root, "remnic.config.json");
+  try {
+    fs.writeFileSync(configPath, JSON.stringify({ sessionKeyPrefix: ["myuser"] }));
+    assert.throws(
+      () => loadConfig({ configPath, env: {} }),
+      /Invalid string value for Remnic Pi config field sessionKeyPrefix/,
+    );
+
+    fs.writeFileSync(configPath, JSON.stringify({ sessionKeyPrefix: "   " }));
+    assert.throws(
+      () => loadConfig({ configPath, env: {} }),
+      /Invalid string value for Remnic Pi config field sessionKeyPrefix/,
+    );
+
+    fs.writeFileSync(configPath, JSON.stringify({ sessionKeyPrefix: true }));
+    assert.throws(
+      () => loadConfig({ configPath, env: {} }),
+      /Invalid string value for Remnic Pi config field sessionKeyPrefix/,
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("loadConfig accepts a configurable sessionKeyPrefix", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "remnic-pi-config-prefix-"));
   const configPath = path.join(root, "remnic.config.json");

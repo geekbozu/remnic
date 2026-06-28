@@ -45,6 +45,7 @@ export interface PublishContext {
     memoryDir: string;
     daemonUrl?: string;
     daemonPort?: number;
+    sessionKeyPrefix?: string;
     namespace?: string;
   };
   readonly skillsRoot: string;

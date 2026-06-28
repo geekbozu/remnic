@@ -174,7 +174,7 @@ export function createRemnicPiExtension(options: RemnicPiExtensionOptions = {}) 
       };
     });
 
-    registerCommands(pi, client, config);
+    registerCommands(pi, client, config, config.sessionKeyPrefix);
     if (config.mcpToolsEnabled && config.authToken) {
       await registerMcpTools(pi, client, config);
     }
@@ -185,13 +185,13 @@ export default async function remnicPiExtension(pi: PiApi): Promise<void> {
   await createRemnicPiExtension()(pi);
 }
 
-function registerCommands(pi: PiApi, client: RemnicClient, config: RemnicPiConfig): void {
+function registerCommands(pi: PiApi, client: RemnicClient, config: RemnicPiConfig, sessionKeyPrefix: string): void {
   pi.registerCommand("remnic-status", {
     description: "Check Remnic daemon status",
     handler: commandHandler(async (_args, _ctx, session) => {
       const health = await client.health();
       session.notify(`Remnic ${health.ok ? "healthy" : "unhealthy"} at ${config.remnicDaemonUrl}`, health.ok ? "success" : "warning");
-    }),
+    }, sessionKeyPrefix),
   });
 
   pi.registerCommand("remnic-recall", {
@@ -204,7 +204,7 @@ function registerCommands(pi: PiApi, client: RemnicClient, config: RemnicPiConfi
       }
       const result = await client.recall(query, session.sessionKey, session.cwd);
       session.notify(trimContext(result.context ?? "(no Remnic context)", MAX_CONTEXT_CHARS), "info");
-    }),
+    }, sessionKeyPrefix),
   });
 
   pi.registerCommand("remnic-remember", {
@@ -217,7 +217,7 @@ function registerCommands(pi: PiApi, client: RemnicClient, config: RemnicPiConfi
       }
       await client.storeMemory(content, session.sessionKey);
       session.notify("Stored Remnic memory", "success");
-    }),
+    }, sessionKeyPrefix),
   });
 
   pi.registerCommand("remnic-lcm-search", {
@@ -230,7 +230,7 @@ function registerCommands(pi: PiApi, client: RemnicClient, config: RemnicPiConfi
       }
       const result = await client.lcmSearch(query, session.sessionKey);
       session.notify(JSON.stringify(result, null, 2), "info");
-    }),
+    }, sessionKeyPrefix),
   });
 
   pi.registerCommand("remnic-why", {
@@ -238,7 +238,7 @@ function registerCommands(pi: PiApi, client: RemnicClient, config: RemnicPiConfi
     handler: commandHandler(async (_args, _ctx, session) => {
       const result = await client.recallExplain(session.sessionKey);
       session.notify(JSON.stringify(result, null, 2), "info");
-    }),
+    }, sessionKeyPrefix),
   });
 
   pi.registerCommand("remnic-compact", {
@@ -246,7 +246,7 @@ function registerCommands(pi: PiApi, client: RemnicClient, config: RemnicPiConfi
     handler: commandHandler(async (_args, _ctx, session) => {
       session.compact?.();
       session.notify("Compaction requested", "info");
-    }),
+    }, sessionKeyPrefix),
   });
 }
 

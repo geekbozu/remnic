@@ -8285,12 +8285,16 @@ async function cmdConnectors(action: string, rest: string[], json: boolean): Pro
               typeof effectiveConnectorConfig.namespace === "string" && effectiveConnectorConfig.namespace.length > 0
                 ? effectiveConnectorConfig.namespace
                 : undefined;
+            const connectorSessionKeyPrefix =
+              typeof effectiveConnectorConfig.sessionKeyPrefix === "string" && effectiveConnectorConfig.sessionKeyPrefix.length > 0
+                ? effectiveConnectorConfig.sessionKeyPrefix
+                : undefined;
             const connectorDaemonUrl =
               typeof effectiveConnectorConfig.remnicDaemonUrl === "string" && effectiveConnectorConfig.remnicDaemonUrl.trim().length > 0
                 ? effectiveConnectorConfig.remnicDaemonUrl.trim()
                 : undefined;
             const pubResult = await pub.publish({
-              config: { memoryDir, namespace: connectorNamespace, daemonUrl: connectorDaemonUrl },
+              config: { memoryDir, namespace: connectorNamespace, sessionKeyPrefix: connectorSessionKeyPrefix, daemonUrl: connectorDaemonUrl },
               skillsRoot: path.join(memoryDir, "skills"),
               rollbackTokenEntry: preInstallTokenEntry,
               log: { info: console.log, warn: console.warn, error: console.error },
