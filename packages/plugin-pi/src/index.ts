@@ -50,6 +50,7 @@ type PiContextSnapshot = {
 };
 type PiContextSnapshotOptions = {
   includeSessionHistory?: boolean;
+  sessionKeyPrefix?: string;
 };
 
 export function createRemnicPiExtension(options: RemnicPiExtensionOptions = {}) {
@@ -251,9 +252,10 @@ function registerCommands(pi: PiApi, client: RemnicClient, config: RemnicPiConfi
 
 function commandHandler(
   handler: (args: string, ctx: any, session: PiContextSnapshot) => Promise<void>,
+  sessionKeyPrefix?: string,
 ): (args: string, ctx: any) => Promise<void> {
   return async (args, ctx) => {
-    const session = snapshotPiContext(ctx);
+    const session = snapshotPiContext(ctx, { sessionKeyPrefix });
     if (!session) return;
     try {
       await handler(args, ctx, session);
@@ -264,6 +266,7 @@ function commandHandler(
 }
 
 async function registerMcpTools(pi: PiApi, client: RemnicClient, config: RemnicPiConfig): Promise<void> {
+  const sessionKeyPrefix = config.sessionKeyPrefix;
   let tools: McpTool[] = [];
   try {
     tools = await client.mcpListTools({ timeoutMs: config.startupRequestTimeoutMs });
@@ -279,7 +282,7 @@ async function registerMcpTools(pi: PiApi, client: RemnicClient, config: RemnicP
       description: tool.description ?? `Call ${tool.name}`,
       parameters: toPiToolParametersSchema(tool.inputSchema),
       async execute(_toolCallId: string, params: Record<string, unknown>, _signal: AbortSignal | undefined, _onUpdate: unknown, ctx: any) {
-        const session = snapshotPiContext(ctx);
+        const session = snapshotPiContext(ctx, { sessionKeyPrefix });
         if (!session) {
           return {
             content: [{ type: "text", text: "Remnic tool skipped because the Pi context is no longer active." }],
@@ -290,8 +293,8 @@ async function registerMcpTools(pi: PiApi, client: RemnicClient, config: RemnicP
         const result = await client.mcpTool(tool.name, {
           ...safeParams,
           sessionKey: session.sessionKey,
-          namespace: config.namespace,
           cwd: session.cwd,
+          ...(config.namespace ? { namespace: config.namespace } : {}),
         });
         return {
           content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
@@ -399,7 +402,7 @@ export async function observeMessages(
   observedHashes: Set<string>,
   liveObservedReplayKeys?: Map<string, number>,
 ): Promise<void> {
-  const session = snapshotPiContext(ctx);
+  const session = snapshotPiContext(ctx);  // generic ctx — no prefix override needed
   if (!session) return;
   await observeMessagesForSession(session, client, rawMessages, observedHashes, liveObservedReplayKeys);
 }
@@ -545,14 +548,14 @@ function persistObservedState(pi: PiApi, observedHashes: Set<string>): void {
 async function setStatus(session: PiContextSnapshot, client: RemnicClient, config: RemnicPiConfig): Promise<void> {
   try {
     await client.health({ timeoutMs: config.startupRequestTimeoutMs });
-    session.setStatus("remnic", `Remnic ${config.namespace ? `(${config.namespace})` : "ready"}`);
+    session.setStatus("remnic", `Remnic ${config.sessionKeyPrefix !== "pi" ? `(${config.sessionKeyPrefix})` : "ready"}`);
   } catch {
     session.setStatus("remnic", "Remnic offline");
   }
 }
 
 function snapshotPiContext(ctx: any, options: PiContextSnapshotOptions = {}): PiContextSnapshot | null {
-  const sessionKey = safeSessionKeyFromContext(ctx);
+  const sessionKey = safeSessionKeyFromContext(ctx, options.sessionKeyPrefix);
   if (!sessionKey) return null;
   const cwd = safeStringRead(() => ctx?.cwd, "");
   const hasUI = safeRead(() => ctx?.hasUI, undefined) === false;
@@ -570,9 +573,9 @@ function snapshotPiContext(ctx: any, options: PiContextSnapshotOptions = {}): Pi
   };
 }
 
-function safeSessionKeyFromContext(ctx: any): string | null {
+function safeSessionKeyFromContext(ctx: any, prefix?: string): string | null {
   try {
-    return sessionKeyFromContext(ctx);
+    return sessionKeyFromContext(ctx, prefix);
   } catch {
     return null;
   }

@@ -48,7 +48,7 @@ export class PiMemoryExtensionPublisher implements MemoryExtensionPublisher {
   }
 
   async renderInstructions(ctx: PublishContext): Promise<string> {
-    const namespace = ctx.config.namespace ?? "default";
+    const prefix = ctx.config.sessionKeyPrefix ?? "pi";
     const daemonUrl = resolveDaemonUrl(ctx);
     return [
       "# Remnic for Pi",
@@ -66,10 +66,10 @@ export class PiMemoryExtensionPublisher implements MemoryExtensionPublisher {
       "## Runtime",
       "",
       `- Remnic daemon: \`${daemonUrl}\``,
-      `- Namespace: \`${namespace}\``,
+      `- Session key prefix: \`${prefix}\``,
       `- Memory directory: \`${ctx.config.memoryDir}\``,
       "",
-      "The private `remnic.config.json` file stores the daemon URL, namespace, and connector auth token with owner-only permissions.",
+      "The private `remnic.config.json` file stores the daemon URL, session key prefix, and connector auth token with owner-only permissions.",
     ].join("\n");
   }
 
@@ -111,6 +111,9 @@ export class PiMemoryExtensionPublisher implements MemoryExtensionPublisher {
       };
       if (token) {
         config.authToken = token;
+      }
+      if (ctx.config.sessionKeyPrefix) {
+        config.sessionKeyPrefix = ctx.config.sessionKeyPrefix;
       }
       if (ctx.config.namespace) {
         config.namespace = ctx.config.namespace;

@@ -6,9 +6,12 @@ import type { ObserveMessage, ObserveMessagePart } from "./client.js";
 
 type PiMessage = Record<string, unknown>;
 
-export function sessionKeyFromContext(ctx: { sessionManager?: { getSessionId?: () => string } }): string {
+export function sessionKeyFromContext(
+  ctx: { sessionManager?: { getSessionId?: () => string } },
+  prefix = "pi",
+): string {
   const id = ctx.sessionManager?.getSessionId?.();
-  return id && id.trim().length > 0 ? `pi:${id}` : "pi:default";
+  return id && id.trim().length > 0 ? `${prefix}:${id}` : `${prefix}:default`;
 }
 
 export function textFromMessage(message: unknown): string {

@@ -10,7 +10,14 @@ import {
   toObserveMessage,
 } from "./messages.js";
 
-test("sessionKeyFromContext uses Pi session id when available", () => {
+test("sessionKeyFromContext uses the configured prefix when available", () => {
+  assert.equal(
+    sessionKeyFromContext({ sessionManager: { getSessionId: () => "abc123" } }, "myuser"),
+    "myuser:abc123",
+  );
+});
+
+test("sessionKeyFromContext defaults to pi: prefix", () => {
   assert.equal(
     sessionKeyFromContext({ sessionManager: { getSessionId: () => "abc123" } }),
     "pi:abc123",

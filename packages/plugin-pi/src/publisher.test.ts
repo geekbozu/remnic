@@ -235,7 +235,7 @@ test("Pi publisher preserves user-managed extension settings on reinstall", asyn
       {
         remnicDaemonUrl: "http://old-daemon",
         authToken: "old-token",
-        namespace: "old-namespace",
+        sessionKeyPrefix: "old-prefix",
         recallMode: "minimal",
         recallTopK: 3,
         recallBudgetChars: 2048,
@@ -275,7 +275,7 @@ test("Pi publisher preserves user-managed extension settings on reinstall", asyn
     config: {
       daemonUrl: "http://new-daemon/",
       memoryDir: path.join(root, "memory"),
-      namespace: "new-namespace",
+      sessionKeyPrefix: "new-prefix",
     },
     skillsRoot: path.join(root, "memory", "skills"),
     log: { info: () => undefined, warn: () => undefined, error: () => undefined },
@@ -284,7 +284,7 @@ test("Pi publisher preserves user-managed extension settings on reinstall", asyn
   const publishedConfig = JSON.parse(fs.readFileSync(configPath, "utf8")) as Record<string, unknown>;
   assert.equal(publishedConfig.remnicDaemonUrl, "http://new-daemon");
   assert.equal(publishedConfig.authToken, "new-token");
-  assert.equal(publishedConfig.namespace, "new-namespace");
+  assert.equal(publishedConfig.sessionKeyPrefix, "new-prefix");
   assert.equal(publishedConfig.recallMode, "minimal");
   assert.equal(publishedConfig.recallTopK, 3);
   assert.equal(publishedConfig.recallBudgetChars, 2048);
@@ -298,8 +298,8 @@ test("Pi publisher preserves user-managed extension settings on reinstall", asyn
   assert.equal(publishedConfig.startupRequestTimeoutMs, 2345);
 });
 
-test("Pi publisher preserves existing namespace when reinstall omits namespace", async (t) => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "remnic-pi-publisher-namespace-test-"));
+test("Pi publisher preserves existing session key prefix when reinstall omits prefix", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "remnic-pi-publisher-prefix-test-"));
   const home = path.join(root, "home");
   const piAgentHome = path.join(root, "pi-agent");
   const extensionRoot = path.join(piAgentHome, "extensions", "remnic");
@@ -312,7 +312,7 @@ test("Pi publisher preserves existing namespace when reinstall omits namespace",
       {
         remnicDaemonUrl: "http://old-daemon",
         authToken: "old-token",
-        namespace: "manual-namespace",
+        sessionKeyPrefix: "manual-prefix",
       },
       null,
       2
@@ -349,7 +349,7 @@ test("Pi publisher preserves existing namespace when reinstall omits namespace",
   const publishedConfig = JSON.parse(fs.readFileSync(configPath, "utf8")) as Record<string, unknown>;
   assert.equal(publishedConfig.remnicDaemonUrl, "http://new-daemon");
   assert.equal(publishedConfig.authToken, "new-token");
-  assert.equal(publishedConfig.namespace, "manual-namespace");
+  assert.equal(publishedConfig.sessionKeyPrefix, "manual-prefix");
 });
 
 test("Pi publisher fails closed when existing config cannot be parsed", async (t) => {

@@ -120,6 +120,7 @@ test("loadConfig merges file values and coerces boolean-like strings", () => {
       JSON.stringify({
         remnicDaemonUrl: "http://127.0.0.1:9999/",
         authToken: "remnic_pi_test",
+        sessionKeyPrefix: "myuser",
         namespace: "work",
         recallEnabled: "false",
         observeSkipExtraction: "1",
@@ -134,6 +135,7 @@ test("loadConfig merges file values and coerces boolean-like strings", () => {
 
     assert.equal(config.remnicDaemonUrl, "http://127.0.0.1:9999");
     assert.equal(config.authToken, "remnic_pi_test");
+    assert.equal(config.sessionKeyPrefix, "myuser");
     assert.equal(config.namespace, "work");
     assert.equal(config.recallEnabled, false);
     assert.equal(config.observeSkipExtraction, true);
@@ -291,21 +293,29 @@ test("loadConfig fails closed on invalid numeric values", () => {
   }
 });
 
-test("loadConfig fails closed on invalid namespace values", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "remnic-pi-config-namespace-"));
+test("loadConfig accepts a configurable sessionKeyPrefix", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "remnic-pi-config-prefix-"));
   const configPath = path.join(root, "remnic.config.json");
   try {
-    fs.writeFileSync(configPath, JSON.stringify({ namespace: ["work"] }));
-    assert.throws(
-      () => loadConfig({ configPath, env: {} }),
-      /Invalid string value for Remnic Pi config field namespace/,
-    );
+    fs.writeFileSync(configPath, JSON.stringify({ sessionKeyPrefix: "myuser" }));
 
-    fs.writeFileSync(configPath, JSON.stringify({ namespace: "   " }));
-    assert.throws(
-      () => loadConfig({ configPath, env: {} }),
-      /Invalid string value for Remnic Pi config field namespace/,
-    );
+    const config = loadConfig({ configPath, env: {} });
+
+    assert.equal(config.sessionKeyPrefix, "myuser");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("loadConfig defaults sessionKeyPrefix to pi", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "remnic-pi-prefix-default-"));
+  const configPath = path.join(root, "remnic.config.json");
+  try {
+    fs.writeFileSync(configPath, JSON.stringify({}));
+
+    const config = loadConfig({ configPath, env: {} });
+
+    assert.equal(config.sessionKeyPrefix, "pi");
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

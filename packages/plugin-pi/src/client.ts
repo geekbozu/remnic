@@ -52,7 +52,7 @@ export class RemnicClient {
       query,
       sessionKey,
       cwd,
-      namespace: this.config.namespace,
+      ...(this.config.namespace ? { namespace: this.config.namespace } : {}),
       topK: this.config.recallTopK,
       mode: this.config.recallMode,
     });
@@ -61,7 +61,7 @@ export class RemnicClient {
   async recallExplain(sessionKey: string): Promise<Record<string, unknown>> {
     return this.request("POST", "/engram/v1/recall/explain", {
       sessionKey,
-      namespace: this.config.namespace,
+      ...(this.config.namespace ? { namespace: this.config.namespace } : {}),
     });
   }
 
@@ -69,7 +69,7 @@ export class RemnicClient {
     return this.request("POST", "/engram/v1/observe", {
       sessionKey,
       cwd,
-      namespace: this.config.namespace,
+      ...(this.config.namespace ? { namespace: this.config.namespace } : {}),
       skipExtraction: this.config.observeSkipExtraction,
       messages,
     });
@@ -81,7 +81,7 @@ export class RemnicClient {
       category: "fact",
       sourceReason: "Captured from Pi via Remnic extension",
       sessionKey,
-      namespace: this.config.namespace,
+      ...(this.config.namespace ? { namespace: this.config.namespace } : {}),
     });
   }
 
@@ -89,24 +89,24 @@ export class RemnicClient {
     return this.request("POST", "/engram/v1/lcm/search", {
       query,
       sessionKey,
-      namespace: this.config.namespace,
       limit,
+      ...(this.config.namespace ? { namespace: this.config.namespace } : {}),
     });
   }
 
   async lcmCompactionFlush(sessionKey: string): Promise<Record<string, unknown>> {
     return this.request("POST", "/engram/v1/lcm/compaction/flush", {
       sessionKey,
-      namespace: this.config.namespace,
+      ...(this.config.namespace ? { namespace: this.config.namespace } : {}),
     });
   }
 
   async lcmCompactionRecord(sessionKey: string, tokensBefore: number, tokensAfter: number): Promise<Record<string, unknown>> {
     return this.request("POST", "/engram/v1/lcm/compaction/record", {
       sessionKey,
-      namespace: this.config.namespace,
       tokensBefore,
       tokensAfter,
+      ...(this.config.namespace ? { namespace: this.config.namespace } : {}),
     });
   }
 
@@ -114,7 +114,7 @@ export class RemnicClient {
     return this.mcpTool("remnic.context_checkpoint", {
       sessionKey,
       context,
-      namespace: this.config.namespace,
+      ...(this.config.namespace ? { namespace: this.config.namespace } : {}),
     });
   }
 

@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- **plugin-pi**: Replace hard-coded `namespace` + `pi:` session key prefix with
+  configurable `sessionKeyPrefix` (default `"pi"`) and optional `namespace`.
+  When `namespace` is unset, the daemon resolves namespace from auth principal
+  and coding context instead of the extension injecting a client-side override.
+
 ## [v9.3.162] — 2026-04-23
 
 ### Added

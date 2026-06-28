@@ -8,6 +8,7 @@ import { REMNIC_PI_EXTENSION_DIR_NAME, resolvePiAgentHome } from "./paths.js";
 export interface RemnicPiConfig {
   remnicDaemonUrl: string;
   authToken?: string;
+  sessionKeyPrefix: string;
   namespace?: string;
   recallMode: "auto" | "minimal" | "full" | "graph_mode" | "no_recall";
   recallTopK: number;
@@ -29,6 +30,7 @@ export interface LoadConfigOptions {
 
 const DEFAULT_CONFIG: RemnicPiConfig = {
   remnicDaemonUrl: "http://127.0.0.1:4318",
+  sessionKeyPrefix: "pi",
   recallMode: "auto",
   recallTopK: 8,
   recallBudgetChars: 12000,
@@ -159,11 +161,15 @@ export function loadConfig(options: LoadConfigOptions = {}): RemnicPiConfig {
   const authToken =
     coerceOptionalString(fileConfig.authToken, "authToken") ??
     coerceOptionalString(env.REMNIC_PI_AUTH_TOKEN, "REMNIC_PI_AUTH_TOKEN");
+  const sessionKeyPrefix =
+    coerceOptionalNonEmptyString(fileConfig.sessionKeyPrefix, "sessionKeyPrefix") ??
+    DEFAULT_CONFIG.sessionKeyPrefix;
   const namespace = coerceOptionalNonEmptyString(fileConfig.namespace, "namespace");
 
   return {
     remnicDaemonUrl: daemonUrl,
     authToken,
+    sessionKeyPrefix,
     namespace,
     recallMode: coerceRecallMode(fileConfig.recallMode),
     recallTopK: coercePositiveInt(fileConfig.recallTopK, DEFAULT_CONFIG.recallTopK, 50, "recallTopK"),
