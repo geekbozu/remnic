@@ -30,7 +30,9 @@ ENV NODE_ENV=production \
 WORKDIR /app
 
 RUN corepack enable \
-  && mkdir -p /data /app \
+  && mkdir -p /data /app
+
+RUN npm install -g @tobilu/qmd@2.5.3 \
   && chown -R node:node /data /app
 
 COPY --from=build --chown=node:node /app/package.json /app/pnpm-lock.yaml /app/pnpm-workspace.yaml ./

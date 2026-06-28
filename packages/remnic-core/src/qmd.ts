@@ -2732,11 +2732,22 @@ export class QmdClient implements SearchBackend {
       return "unknown";
     }
 
-    log.info(
-      `QMD collection "${targetCollection}" not found. ` +
-        `Add it to ~/.config/qmd/index.yml pointing at ${memoryDir}`,
-    );
-    return "missing";
+    try {
+      await this.runQmdCommand(
+        ["collection", "add", targetCollection, memoryDir],
+        QMD_TIMEOUT_MS,
+        effectiveExecution?.signal,
+      );
+      log.info(
+        `QMD collection "${targetCollection}" auto-created at ${memoryDir}`,
+      );
+      return "present";
+    } catch (err) {
+      log.warn(
+        `QMD collection "${targetCollection}" not found and auto-create failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return "missing";
+    }
   }
 }
 
