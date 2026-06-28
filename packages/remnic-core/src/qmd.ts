@@ -2734,7 +2734,7 @@ export class QmdClient implements SearchBackend {
 
     try {
       await this.runQmdCommand(
-        ["collection", "add", targetCollection, memoryDir],
+        ["collection", "add", memoryDir, "--name", targetCollection],
         QMD_TIMEOUT_MS,
         effectiveExecution?.signal,
       );
