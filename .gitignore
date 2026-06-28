@@ -26,6 +26,7 @@ Thumbs.db
 
 # Local state (never commit user memory data)
 state/
+data/
 
 # Auto-generated claude-mem context files (contain session-specific data)
 src/CLAUDE.md
