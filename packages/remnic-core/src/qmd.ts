@@ -2743,6 +2743,12 @@ export class QmdClient implements SearchBackend {
       );
       return "present";
     } catch (err) {
+      if (isCallerCancellation(err, effectiveExecution?.signal)) {
+        log.debug(
+          `QMD collection auto-create for "${targetCollection}" was cancelled; keeping collection state unknown`,
+        );
+        return "unknown";
+      }
       log.warn(
         `QMD collection "${targetCollection}" not found and auto-create failed: ${err instanceof Error ? err.message : String(err)}`,
       );
