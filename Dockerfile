@@ -2,11 +2,12 @@ FROM node:22-bookworm-slim AS build
 
 WORKDIR /app
 
+COPY package.json ./
+
 RUN apt-get update \
   && apt-get install -y --no-install-recommends build-essential ca-certificates python3 \
   && rm -rf /var/lib/apt/lists/* \
-  && corepack enable \
-  && npm install -g @tobilu/qmd@2.5.3
+  && npm install -g "pnpm@$(node -p 'require("./package.json").packageManager.split("@")[1]')" @tobilu/qmd@2.5.3
 
 COPY . .
 
@@ -30,8 +31,7 @@ ENV NODE_ENV=production \
 
 WORKDIR /app
 
-RUN corepack enable \
-  && mkdir -p /data /app \
+RUN mkdir -p /data /app \
   && chown -R node:node /data /app
 
 # QMD was installed via npm install -g in the build stage (where python3 is available
