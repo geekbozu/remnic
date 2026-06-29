@@ -1,8 +1,15 @@
 import path from "node:path";
 import type { PluginConfig, QmdSearchResult } from "../types.js";
-import type { SearchBackend, SearchExecutionOptions, SearchQueryOptions } from "../search/port.js";
+import type {
+  SearchBackend,
+  SearchExecutionOptions,
+  SearchQueryOptions,
+} from "../search/port.js";
 import { createSearchBackend } from "../search/factory.js";
 import { namespaceIdentityToken, normalizeNamespaceIdentity } from "./identity.js";
+
+const NESTED_NAMESPACE_FILTER_OVERFETCH_FACTOR = 4;
+const NESTED_NAMESPACE_FILTER_OVERFETCH_MIN = 50;
 
 export function namespaceCollectionName(
   baseCollection: string,
@@ -79,22 +86,38 @@ export class NamespaceSearchRouter {
         if (!record.available || record.collectionState === "missing") {
           return { namespace, results: [] as QmdSearchResult[] };
         }
+        const backendLimit = backendSearchLimit(record, maxResults);
         let results: QmdSearchResult[];
         switch (method) {
           case "hybrid":
-            results = await record.backend.hybridSearch(query, record.collection, maxResults, options.execution);
+            results = await record.backend.hybridSearch(
+              query,
+              record.collection,
+              backendLimit,
+              options.execution,
+            );
             break;
           case "bm25":
-            results = await record.backend.bm25Search(query, record.collection, maxResults, options.execution);
+            results = await record.backend.bm25Search(
+              query,
+              record.collection,
+              backendLimit,
+              options.execution,
+            );
             break;
           case "vector":
-            results = await record.backend.vectorSearch(query, record.collection, maxResults, options.execution);
+            results = await record.backend.vectorSearch(
+              query,
+              record.collection,
+              backendLimit,
+              options.execution,
+            );
             break;
           default:
             results = await record.backend.search(
               query,
               record.collection,
-              maxResults,
+              backendLimit,
               options.searchOptions,
               options.execution,
             );
@@ -253,6 +276,18 @@ function filterNamespaceSubtreeResults(
   if (!record.filtersNestedNamespaces) return results;
   return results.filter((result) =>
     !pathIsInsideNamespaceSubtree(record.memoryDir, record.collection, result.path)
+  );
+}
+
+function backendSearchLimit(
+  record: NamespaceBackendRecord,
+  maxResults: number,
+): number {
+  if (!record.filtersNestedNamespaces) return maxResults;
+  return Math.max(
+    maxResults,
+    maxResults * NESTED_NAMESPACE_FILTER_OVERFETCH_FACTOR,
+    NESTED_NAMESPACE_FILTER_OVERFETCH_MIN,
   );
 }
 

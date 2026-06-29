@@ -1,12 +1,20 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { NamespaceSearchRouter } from "./search.js";
-import type { SearchBackend } from "../search/port.js";
+import type {
+  SearchBackend,
+  SearchExecutionOptions,
+  SearchQueryOptions,
+} from "../search/port.js";
 import type { PluginConfig, QmdSearchResult } from "../types.js";
 
 class FakeBackend implements SearchBackend {
   updates = 0;
-  calls: Array<{ method: string; collection: string | undefined }> = [];
+  calls: Array<{
+    method: string;
+    collection: string | undefined;
+    maxResults: number | undefined;
+  }> = [];
   ensureSignals: Array<AbortSignal | undefined> = [];
   ensureCollections: Array<string | undefined> = [];
   checkSignals: Array<AbortSignal | undefined> = [];
@@ -16,6 +24,12 @@ class FakeBackend implements SearchBackend {
     private readonly globalUpdate: boolean,
     private readonly results: QmdSearchResult[] = [],
   ) {}
+
+  private limitedResults(maxResults: number | undefined): QmdSearchResult[] {
+    return typeof maxResults === "number"
+      ? this.results.slice(0, maxResults)
+      : this.results;
+  }
 
   async probe(): Promise<boolean> {
     return true;
@@ -29,28 +43,53 @@ class FakeBackend implements SearchBackend {
     return "fake";
   }
 
-  async search(_query?: string, collection?: string): Promise<QmdSearchResult[]> {
-    this.calls.push({ method: "search", collection });
-    return this.results;
+  async search(
+    _query: string,
+    collection?: string,
+    maxResults?: number,
+    _options?: SearchQueryOptions,
+    _execution?: SearchExecutionOptions,
+  ): Promise<QmdSearchResult[]> {
+    this.calls.push({ method: "search", collection, maxResults });
+    return this.limitedResults(maxResults);
   }
 
-  async searchGlobal(): Promise<QmdSearchResult[]> {
-    return [];
+  async searchGlobal(
+    _query: string,
+    maxResults?: number,
+    _execution?: SearchExecutionOptions,
+  ): Promise<QmdSearchResult[]> {
+    return this.limitedResults(maxResults);
   }
 
-  async bm25Search(_query?: string, collection?: string): Promise<QmdSearchResult[]> {
-    this.calls.push({ method: "bm25", collection });
-    return [];
+  async bm25Search(
+    _query: string,
+    collection?: string,
+    maxResults?: number,
+    _execution?: SearchExecutionOptions,
+  ): Promise<QmdSearchResult[]> {
+    this.calls.push({ method: "bm25", collection, maxResults });
+    return this.limitedResults(maxResults);
   }
 
-  async vectorSearch(_query?: string, collection?: string): Promise<QmdSearchResult[]> {
-    this.calls.push({ method: "vector", collection });
-    return [];
+  async vectorSearch(
+    _query: string,
+    collection?: string,
+    maxResults?: number,
+    _execution?: SearchExecutionOptions,
+  ): Promise<QmdSearchResult[]> {
+    this.calls.push({ method: "vector", collection, maxResults });
+    return this.limitedResults(maxResults);
   }
 
-  async hybridSearch(_query?: string, collection?: string): Promise<QmdSearchResult[]> {
-    this.calls.push({ method: "hybrid", collection });
-    return [];
+  async hybridSearch(
+    _query: string,
+    collection?: string,
+    maxResults?: number,
+    _execution?: SearchExecutionOptions,
+  ): Promise<QmdSearchResult[]> {
+    this.calls.push({ method: "hybrid", collection, maxResults });
+    return this.limitedResults(maxResults);
   }
 
   async update(): Promise<void> {
@@ -297,5 +336,51 @@ test("legacy default namespace root filters nested namespace search results", as
   assert.deepEqual(
     results.map((result) => result.docid),
     ["main", "qmd-main"],
+  );
+});
+
+test("legacy default namespace root overfetches before filtering nested namespace results", async () => {
+  const backend = new FakeBackend(false, [
+    {
+      path: "/tmp/remnic/namespaces/shared/facts/shared.md",
+      docid: "shared",
+      score: 0.99,
+      snippet: "shared",
+    },
+    {
+      path: "qmd://openclaw-engram/namespaces/project/facts/project.md",
+      docid: "project",
+      score: 0.98,
+      snippet: "project",
+    },
+    {
+      path: "/tmp/remnic/facts/main-a.md",
+      docid: "main-a",
+      score: 0.9,
+      snippet: "main-a",
+    },
+    {
+      path: "/tmp/remnic/facts/main-b.md",
+      docid: "main-b",
+      score: 0.8,
+      snippet: "main-b",
+    },
+  ]);
+  const router = new NamespaceSearchRouter(
+    config(),
+    { storageFor: async () => ({ dir: "/tmp/remnic" }) },
+    () => backend,
+  );
+
+  const results = await router.searchAcrossNamespaces({
+    query: "a",
+    namespaces: ["main"],
+    maxResults: 2,
+  });
+
+  assert.equal(backend.calls[0]?.maxResults, 50);
+  assert.deepEqual(
+    results.map((result) => result.docid),
+    ["main-a", "main-b"],
   );
 });
