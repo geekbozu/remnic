@@ -251,18 +251,49 @@ function filterNamespaceSubtreeResults(
   results: QmdSearchResult[],
 ): QmdSearchResult[] {
   if (!record.filtersNestedNamespaces) return results;
-  return results.filter((result) => !pathIsInsideNamespaceSubtree(record.memoryDir, result.path));
+  return results.filter((result) =>
+    !pathIsInsideNamespaceSubtree(record.memoryDir, record.collection, result.path)
+  );
 }
 
-function pathIsInsideNamespaceSubtree(memoryDir: string, resultPath: string | undefined): boolean {
+function pathIsInsideNamespaceSubtree(
+  memoryDir: string,
+  collection: string,
+  resultPath: string | undefined,
+): boolean {
   if (!resultPath) return false;
+  const normalizedResultPath = normalizeQmdResultPath(resultPath, collection);
   const memoryRoot = path.resolve(memoryDir);
   const namespacesRoot = path.join(memoryRoot, "namespaces");
-  const candidate = path.isAbsolute(resultPath)
-    ? path.normalize(resultPath)
-    : path.resolve(memoryRoot, resultPath);
+  const candidate = path.isAbsolute(normalizedResultPath)
+    ? path.normalize(normalizedResultPath)
+    : path.resolve(memoryRoot, normalizedResultPath);
   const relative = path.relative(namespacesRoot, candidate);
   return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+function normalizeQmdResultPath(resultPath: string, collection: string): string {
+  let value = resultPath.trim();
+  if (value.startsWith("qmd://")) {
+    try {
+      const parsed = new URL(value);
+      if (parsed.protocol === "qmd:" && parsed.hostname === collection) {
+        value = decodeURIComponent(parsed.pathname.replace(/^\/+/, ""));
+      }
+    } catch {
+      const remainder = value.slice("qmd://".length);
+      const slashIndex = remainder.indexOf("/");
+      if (slashIndex !== -1) {
+        value = remainder.slice(slashIndex + 1);
+      }
+    }
+  }
+
+  const collectionPrefix = `${collection}/`;
+  if (value.startsWith(collectionPrefix)) {
+    value = value.slice(collectionPrefix.length);
+  }
+  return value;
 }
 
 function mergeNamespaceSearchResults(

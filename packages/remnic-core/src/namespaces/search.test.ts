@@ -267,6 +267,24 @@ test("legacy default namespace root filters nested namespace search results", as
         score: 0.8,
         snippet: "project",
       },
+      {
+        path: "qmd://openclaw-engram/facts/qmd-main.md",
+        docid: "qmd-main",
+        score: 0.85,
+        snippet: "qmd-main",
+      },
+      {
+        path: "qmd://openclaw-engram/namespaces/uri/facts/uri.md",
+        docid: "uri",
+        score: 0.99,
+        snippet: "uri",
+      },
+      {
+        path: "openclaw-engram/namespaces/prefix/facts/prefix.md",
+        docid: "prefix",
+        score: 0.98,
+        snippet: "prefix",
+      },
     ]),
   );
 
@@ -278,6 +296,6 @@ test("legacy default namespace root filters nested namespace search results", as
 
   assert.deepEqual(
     results.map((result) => result.docid),
-    ["main"],
+    ["main", "qmd-main"],
   );
 });
