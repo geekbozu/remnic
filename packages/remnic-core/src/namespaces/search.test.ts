@@ -8,6 +8,8 @@ import type {
 } from "../search/port.js";
 import type { PluginConfig, QmdSearchResult } from "../types.js";
 
+type CollectionState = "present" | "missing" | "unknown" | "skipped";
+
 class FakeBackend implements SearchBackend {
   updates = 0;
   calls: Array<{
@@ -23,6 +25,10 @@ class FakeBackend implements SearchBackend {
   constructor(
     private readonly globalUpdate: boolean,
     private readonly results: QmdSearchResult[] = [],
+    private readonly collectionStates: {
+      check?: CollectionState;
+      ensure?: CollectionState;
+    } = {},
   ) {}
 
   private limitedResults(maxResults: number | undefined): QmdSearchResult[] {
@@ -110,7 +116,7 @@ class FakeBackend implements SearchBackend {
     _memoryDir?: string,
     collectionOrExecution?: string | { signal?: AbortSignal },
     execution?: { signal?: AbortSignal },
-  ): Promise<"present"> {
+  ): Promise<CollectionState> {
     const collection = typeof collectionOrExecution === "string"
       ? collectionOrExecution
       : undefined;
@@ -119,13 +125,13 @@ class FakeBackend implements SearchBackend {
       : collectionOrExecution ?? execution;
     this.ensureCollections.push(collection);
     this.ensureSignals.push(effectiveExecution?.signal);
-    return "present";
+    return this.collectionStates.ensure ?? "present";
   }
 
   async checkCollection(
     collectionOrExecution?: string | { signal?: AbortSignal },
     execution?: { signal?: AbortSignal },
-  ): Promise<"present"> {
+  ): Promise<CollectionState> {
     const collection = typeof collectionOrExecution === "string"
       ? collectionOrExecution
       : undefined;
@@ -134,7 +140,7 @@ class FakeBackend implements SearchBackend {
       : collectionOrExecution ?? execution;
     this.checkCollections.push(collection);
     this.checkSignals.push(effectiveExecution?.signal);
-    return "present";
+    return this.collectionStates.check ?? "present";
   }
 }
 
@@ -279,6 +285,21 @@ test("legacy default namespace root checks collection without auto-creating broa
 
   assert.equal(state, "present");
   assert.deepEqual(backend.checkSignals, [controller.signal]);
+  assert.deepEqual(backend.checkCollections, ["openclaw-engram"]);
+  assert.deepEqual(backend.ensureCollections, []);
+});
+
+test("legacy default namespace root fail-opens missing guarded collections", async () => {
+  const backend = new FakeBackend(false, [], { check: "missing" });
+  const router = new NamespaceSearchRouter(
+    config(),
+    { storageFor: async () => ({ dir: "/tmp/remnic" }) },
+    () => backend,
+  );
+
+  const state = await router.ensureNamespaceCollection("main");
+
+  assert.equal(state, "unknown");
   assert.deepEqual(backend.checkCollections, ["openclaw-engram"]);
   assert.deepEqual(backend.ensureCollections, []);
 });

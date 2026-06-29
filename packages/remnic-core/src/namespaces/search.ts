@@ -263,7 +263,10 @@ export class NamespaceSearchRouter {
   ): Promise<CollectionState> {
     if (options.skipAutoCreate) {
       if (!backend.checkCollection) return "unknown";
-      return await backend.checkCollection(collection, options.execution).catch(() => "unknown" as const);
+      const collectionState = await backend
+        .checkCollection(collection, options.execution)
+        .catch(() => "unknown" as const);
+      return collectionState === "missing" ? "unknown" : collectionState;
     }
     return await backend.ensureCollection(memoryDir, collection, options.execution).catch(() => "unknown" as const);
   }
