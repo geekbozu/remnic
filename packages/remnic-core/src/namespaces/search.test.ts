@@ -9,6 +9,8 @@ class FakeBackend implements SearchBackend {
   calls: Array<{ method: string; collection: string | undefined }> = [];
   ensureSignals: Array<AbortSignal | undefined> = [];
   ensureCollections: Array<string | undefined> = [];
+  checkSignals: Array<AbortSignal | undefined> = [];
+  checkCollections: Array<string | undefined> = [];
 
   constructor(
     private readonly globalUpdate: boolean,
@@ -80,10 +82,27 @@ class FakeBackend implements SearchBackend {
     this.ensureSignals.push(effectiveExecution?.signal);
     return "present";
   }
+
+  async checkCollection(
+    collectionOrExecution?: string | { signal?: AbortSignal },
+    execution?: { signal?: AbortSignal },
+  ): Promise<"present"> {
+    const collection = typeof collectionOrExecution === "string"
+      ? collectionOrExecution
+      : undefined;
+    const effectiveExecution = typeof collectionOrExecution === "string"
+      ? execution
+      : collectionOrExecution ?? execution;
+    this.checkCollections.push(collection);
+    this.checkSignals.push(effectiveExecution?.signal);
+    return "present";
+  }
 }
 
 function config(): PluginConfig {
   return {
+    memoryDir: "/tmp/remnic",
+    namespacesEnabled: true,
     qmdCollection: "openclaw-engram",
     defaultNamespace: "main",
     qmdMaxResults: 10,
@@ -204,4 +223,61 @@ test("ensureNamespaceCollection forwards abort signals to backend collection che
   assert.equal(state, "present");
   assert.deepEqual(backend.ensureSignals, [controller.signal]);
   assert.deepEqual(backend.ensureCollections, ["openclaw-engram--ns-6d61696e"]);
+});
+
+test("legacy default namespace root checks collection without auto-creating broad root", async () => {
+  const backend = new FakeBackend(false);
+  const router = new NamespaceSearchRouter(
+    config(),
+    { storageFor: async () => ({ dir: "/tmp/remnic" }) },
+    () => backend,
+  );
+  const controller = new AbortController();
+
+  const state = await router.ensureNamespaceCollection("main", {
+    signal: controller.signal,
+  });
+
+  assert.equal(state, "present");
+  assert.deepEqual(backend.checkSignals, [controller.signal]);
+  assert.deepEqual(backend.checkCollections, ["openclaw-engram"]);
+  assert.deepEqual(backend.ensureCollections, []);
+});
+
+test("legacy default namespace root filters nested namespace search results", async () => {
+  const router = new NamespaceSearchRouter(
+    config(),
+    { storageFor: async () => ({ dir: "/tmp/remnic" }) },
+    () => new FakeBackend(false, [
+      {
+        path: "/tmp/remnic/facts/main.md",
+        docid: "main",
+        score: 0.9,
+        snippet: "main",
+      },
+      {
+        path: "/tmp/remnic/namespaces/shared/facts/shared.md",
+        docid: "shared",
+        score: 0.95,
+        snippet: "shared",
+      },
+      {
+        path: "namespaces/project/facts/project.md",
+        docid: "project",
+        score: 0.8,
+        snippet: "project",
+      },
+    ]),
+  );
+
+  const results = await router.searchAcrossNamespaces({
+    query: "a",
+    namespaces: ["main"],
+    maxResults: 10,
+  });
+
+  assert.deepEqual(
+    results.map((result) => result.docid),
+    ["main"],
+  );
 });

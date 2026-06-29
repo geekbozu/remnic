@@ -2700,8 +2700,7 @@ export class QmdClient implements SearchBackend {
     }
   }
 
-  async ensureCollection(
-    memoryDir: string,
+  async checkCollection(
     collectionOrExecution?: string | SearchExecutionOptions,
     execution?: SearchExecutionOptions,
   ): Promise<"present" | "missing" | "unknown" | "skipped"> {
@@ -2723,6 +2722,7 @@ export class QmdClient implements SearchBackend {
       if (collectionRegex.test(stdout)) {
         return "present";
       }
+      return "missing";
     } catch (err) {
       // Treat command/probe failures as unknown so callers do not disable features
       // permanently after a transient CLI or daemon hiccup.
@@ -2731,6 +2731,20 @@ export class QmdClient implements SearchBackend {
       );
       return "unknown";
     }
+  }
+
+  async ensureCollection(
+    memoryDir: string,
+    collectionOrExecution?: string | SearchExecutionOptions,
+    execution?: SearchExecutionOptions,
+  ): Promise<"present" | "missing" | "unknown" | "skipped"> {
+    const { collection, execution: effectiveExecution } = resolveEnsureCollectionArgs(
+      collectionOrExecution,
+      execution,
+    );
+    const targetCollection = collection ?? this.collection;
+    const collectionState = await this.checkCollection(targetCollection, effectiveExecution);
+    if (collectionState !== "missing") return collectionState;
 
     try {
       await this.runQmdCommand(
