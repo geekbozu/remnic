@@ -2757,14 +2757,29 @@ export class QmdClient implements SearchBackend {
       );
       return "present";
     } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
       if (isCallerCancellation(err, effectiveExecution?.signal)) {
         log.debug(
           `QMD collection auto-create for "${targetCollection}" was cancelled; keeping collection state unknown`,
         );
         return "unknown";
       }
+      const postCreateState = await this.checkCollection(targetCollection, effectiveExecution);
+      if (postCreateState === "present") {
+        log.info(
+          `QMD collection "${targetCollection}" is present after auto-create failure; continuing`,
+        );
+        return "present";
+      }
+      if (/\balready exists\b|\bexists already\b/i.test(msg)) {
+        log.info(
+          `QMD collection "${targetCollection}" already exists after concurrent auto-create; continuing`,
+        );
+        return "present";
+      }
+      if (postCreateState !== "missing") return postCreateState;
       log.warn(
-        `QMD collection "${targetCollection}" not found and auto-create failed: ${err instanceof Error ? err.message : String(err)}`,
+        `QMD collection "${targetCollection}" not found and auto-create failed: ${msg}`,
       );
       return "missing";
     }

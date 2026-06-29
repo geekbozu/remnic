@@ -104,6 +104,41 @@ test("ensureCollection treats cancelled auto-create as unknown", async () => {
   ]);
 });
 
+test("ensureCollection rechecks collection state after auto-create failure", async () => {
+  const client = new QmdClient("memories", 3, {});
+  const internals = client as unknown as SubprocessInternals & {
+    daemonAvailable: boolean;
+  };
+  const calls: string[][] = [];
+  let listCount = 0;
+
+  internals.available = true;
+  internals.daemonAvailable = false;
+  internals.runQmdCommand = async (args) => {
+    calls.push(args);
+    if (args[0] === "collection" && args[1] === "list") {
+      listCount += 1;
+      return {
+        stdout: listCount === 1 ? "" : "memories (qmd://memories/)",
+        stderr: "",
+      };
+    }
+    if (args[0] === "collection" && args[1] === "add") {
+      throw new Error("qmd collection add timed out after indexing started");
+    }
+    throw new Error(`unexpected qmd command: ${args.join(" ")}`);
+  };
+
+  const result = await client.ensureCollection("/tmp/remnic-memory", "memories");
+
+  assert.equal(result, "present");
+  assert.deepEqual(calls, [
+    ["collection", "list"],
+    ["collection", "add", "/tmp/remnic-memory", "--name", "memories"],
+    ["collection", "list"],
+  ]);
+});
+
 test("subprocess fallback defaults to `qmd query` for scoped and global recall", async () => {
   const client = new QmdClient("memories", 3, {});
   const calls = captureSubprocessArgs(client);
